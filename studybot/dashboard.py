@@ -969,6 +969,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     pass
             topic_ids = topic_ids or None
 
+            try:
+                n_new = int(data.get("n_new")) if data.get("n_new") is not None else None
+            except (TypeError, ValueError):
+                n_new = None
+            try:
+                difficulty = int(data.get("difficulty", 3))
+            except (TypeError, ValueError):
+                difficulty = 3
+            if difficulty not in (3, 4, 5, 6):
+                difficulty = 3
+
             build_id = f"b{int(datetime.now().timestamp() * 1000)}"
             with _BUILDS_LOCK:
                 _BUILDS[build_id] = {"events": [], "done": False, "session_id": None, "error": None}
@@ -979,7 +990,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
             def worker():
                 try:
-                    sid = build_session(subject_id, topic_ids=topic_ids, progress_cb=progress_cb)
+                    sid = build_session(
+                        subject_id,
+                        topic_ids=topic_ids,
+                        n_new=n_new,
+                        difficulty=difficulty,
+                        progress_cb=progress_cb,
+                    )
                     with _BUILDS_LOCK:
                         _BUILDS[build_id]["session_id"] = sid
                         _BUILDS[build_id]["done"] = True

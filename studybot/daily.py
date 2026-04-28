@@ -57,17 +57,72 @@ GEN_SCHEMA = {
     "required": ["text", "marks", "markscheme", "figure"],
 }
 
-def _gen_system(subject_name: str, board: str) -> str:
+DIFFICULTY_LABELS = {
+    3: "Standard A-Level",
+    4: "Difficult A-Level",
+    5: "Very Difficult A-Level",
+    6: "Extremely Difficult A-Level",
+}
+
+DIFFICULTY_BLURBS = {
+    3: (
+        "Standard A-Level difficulty — match the average difficulty of the official "
+        "exam paper. Most marks are accessible to a confident A-Level student."
+    ),
+    4: (
+        "Difficult A-Level — pitch this at the harder questions in an exam paper "
+        "(extended-response / Section B style): multi-step, requires synthesis "
+        "across the topic and adjacent ideas. Around the 70th-percentile of exam difficulty."
+    ),
+    5: (
+        "Very Difficult A-Level — top 10% of exam-paper questions: unfamiliar context, "
+        "multiple skills combined, requires careful reasoning and confident use of "
+        "the relevant equations. Many candidates would lose at least one mark."
+    ),
+    6: (
+        "Extremely Difficult A-Level — stretch beyond a typical exam paper, "
+        "BPhO-style or end-of-A-Level challenge questions. Long, multi-stage, "
+        "with subtle traps. STRICTLY within the published specification — "
+        "do NOT introduce off-syllabus topics, methods, or notation."
+    ),
+}
+
+
+def _gen_system(subject_name: str, board: str, difficulty: int = 3) -> str:
+    is_physics = "physics" in subject_name.lower()
+    diff = difficulty if difficulty in DIFFICULTY_BLURBS else 3
+    diff_blurb = DIFFICULTY_BLURBS[diff]
+
+    spec_rules = []
+    if is_physics:
+        spec_rules.append(
+            "Calculus is NOT in the A-Level Physics specification. NEVER use derivatives "
+            "(dx/dt, d²x/dt², dy/dx notation), integrals (∫), limits, or differential "
+            "equations in the question OR the markscheme. Express rates of change using "
+            "gradients of graphs, ratios (Δv/Δt), or algebraic manipulation. 'Area under "
+            "a graph' is fine; integral notation is not."
+        )
+    spec_rules.append(
+        f"Stay strictly within the {board} {subject_name} specification. Do not "
+        "introduce off-syllabus topics, equations, or notation."
+    )
+    spec_rules_block = "\n".join(f"- {r}" for r in spec_rules)
+
     return f"""You are an examiner for {subject_name} ({board}) generating a fresh practice question on a specific topic from the official specification.
 
 CRITICAL — subject lock:
-- EVERY question MUST be a {subject_name} question. Never produce a question from another subject (psychology, biology, chemistry outside of physics chemistry crossover, etc.) even if the topic title sounds generic.
-- Topics with generic-sounding titles ("Evaluation of experimental method", "Significant figures", "Mathematical skills for analysis", "Identification of variables", etc.) MUST still be framed inside a {subject_name} context — use a physics scenario such as mechanics, electricity, waves, materials, fields, thermodynamics, nuclear, quantum, or astrophysics. If the topic is about practical/experimental skills, base the experiment on a physics setup (resistance of a wire, refractive index, period of a pendulum, specific heat capacity, radioactive decay, Young's modulus, etc.).
-- Use SI units, physics quantities, and physics terminology throughout.
+- EVERY question MUST be a {subject_name} question. Never produce a question from another subject (psychology, biology, chemistry outside of physics-chemistry crossover, etc.) even if the topic title sounds generic.
+- Topics with generic-sounding titles ("Evaluation of experimental method", "Significant figures", "Mathematical skills for analysis", "Identification of variables", etc.) MUST still be framed inside a {subject_name} context. For physics, use a physics scenario such as mechanics, electricity, waves, materials, fields, thermodynamics, nuclear, quantum, or astrophysics. If the topic is about practical/experimental skills, base the experiment on a physics setup (resistance of a wire, refractive index, period of a pendulum, specific heat capacity, radioactive decay, Young's modulus, etc.).
+- Use SI units, subject-appropriate quantities, and subject terminology throughout.
 
-Rules:
-- Match the style, difficulty, and structure of official {board} {subject_name} exam questions.
-- Pitch difficulty for a student whose current mastery on this topic is given (0=novice, 1=mastered).
+Specification rules:
+{spec_rules_block}
+
+Difficulty: {diff_blurb}
+- The difficulty level above is the PRIMARY anchor for hardness. Use the student's per-topic mastery score (0=novice, 1=mastered) only for fine-tuning whether the question is more lead-in vs. more stretching within the chosen difficulty band.
+
+Question rules:
+- Match the style and structure of official {board} questions.
 - Include any data/values needed to solve it (don't write open-ended definition prompts).
 - The markscheme must enumerate marking points with how each mark is awarded.
 - Total marks should reflect the depth of the question.
@@ -165,19 +220,21 @@ def pick_due_for_recall(subject_id: int, n: int) -> list[dict]:
         return results
 
 
-def generate_question(topic: dict, *, subject_name: str, board: str) -> dict:
+def generate_question(topic: dict, *, subject_name: str, board: str, difficulty: int = 3) -> dict:
     """Generate one fresh question for a topic. Returns dict with text, marks, markscheme."""
     score = topic.get("score", 0.0) or 0.0
+    diff_label = DIFFICULTY_LABELS.get(difficulty, DIFFICULTY_LABELS[3])
     user_text = (
         f"Subject: {subject_name} ({board})\n"
         f"Topic: {topic['code']} — {topic['title']}\n"
         f"Spec content: {topic['content']}\n"
-        f"Student's current mastery on this topic: {score:.2f}\n\n"
-        f"Generate one {subject_name} practice question on this topic. "
+        f"Student's current mastery on this topic: {score:.2f}\n"
+        f"Required difficulty level: {diff_label} (level {difficulty}).\n\n"
+        f"Generate one {subject_name} practice question on this topic at the required difficulty level. "
         f"Remember: the question must be a {subject_name} question, never from another subject."
     )
     return llm.call_json(
-        system=_gen_system(subject_name, board),
+        system=_gen_system(subject_name, board, difficulty),
         user_blocks=[llm.text_block(user_text)],
         schema=GEN_SCHEMA,
         cache_system=True,
@@ -189,6 +246,8 @@ def build_session(
     subject_id: int,
     *,
     topic_ids: list[int] | None = None,
+    n_new: int | None = None,
+    difficulty: int = 3,
     progress_cb: Callable[[int, int, str], None] | None = None,
     max_workers: int = 4,
 ) -> int:
@@ -196,7 +255,10 @@ def build_session(
     Generated questions are persisted into the questions table with source='generated'.
 
     If `topic_ids` is given, generate one question per topic (in that order, capped
-    at DAILY_NEW). Otherwise fall back to the user's current weakest topics.
+    at `n_new`). Otherwise fall back to the user's current weakest topics.
+
+    `n_new` overrides DAILY_NEW for this session; clamped to [1, 15].
+    `difficulty` is 3..6 (Standard, Difficult, Very Difficult, Extremely Difficult).
 
     `progress_cb(done, total, label)` is called as each question finishes generating,
     so callers (e.g. the web UI) can stream status to the user.
@@ -210,10 +272,13 @@ def build_session(
     subject_name = subject["name"]
     board = subject["board"]
 
+    n_new_eff = max(1, min(15, n_new)) if n_new else DAILY_NEW
+    difficulty = difficulty if difficulty in DIFFICULTY_LABELS else 3
+
     if topic_ids:
-        weak = pick_topics_by_id(subject_id, topic_ids)[:DAILY_NEW]
+        weak = pick_topics_by_id(subject_id, topic_ids)[:n_new_eff]
     else:
-        weak = pick_weakest_topics(subject_id, DAILY_NEW)
+        weak = pick_weakest_topics(subject_id, n_new_eff)
     recall = pick_due_for_recall(subject_id, DAILY_RECALL)
 
     if not weak:
@@ -226,7 +291,7 @@ def build_session(
     generated_map: dict[int, tuple[dict, dict]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
-            ex.submit(generate_question, t, subject_name=subject_name, board=board): (i, t)
+            ex.submit(generate_question, t, subject_name=subject_name, board=board, difficulty=difficulty): (i, t)
             for i, t in enumerate(weak)
         }
         done = 0

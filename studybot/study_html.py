@@ -193,8 +193,71 @@ body {
 .resume-text { font-size:13px; color:#fde68a; }
 .resume-actions { display:flex; gap:8px; }
 
-.topic-picker {
+.session-options {
     margin-top:24px; text-align:left;
+    display:grid; grid-template-columns:1fr 1fr; gap:12px;
+}
+@media (max-width: 540px) {
+    .session-options { grid-template-columns:1fr; }
+}
+.opt-cell {
+    background:rgba(255,255,255,0.02);
+    border:1px solid rgba(255,255,255,0.06);
+    border-radius:10px; padding:12px 14px;
+}
+.opt-label {
+    font-size:11px; color:#52525b; font-weight:600;
+    text-transform:uppercase; letter-spacing:0.06em;
+    margin-bottom:8px;
+}
+.opt-row { display:flex; align-items:center; gap:8px; }
+.num-stepper {
+    display:flex; align-items:center;
+    border:1px solid rgba(255,255,255,0.08);
+    border-radius:8px; overflow:hidden;
+    width:fit-content;
+}
+.num-stepper button {
+    background:transparent; border:none; cursor:pointer;
+    color:#a1a1aa; padding:6px 10px; font-size:14px;
+    font-family:inherit; line-height:1;
+    transition:background 0.15s, color 0.15s;
+}
+.num-stepper button:hover:not(:disabled) {
+    background:rgba(255,255,255,0.04); color:#e4e4e7;
+}
+.num-stepper button:disabled { opacity:0.3; cursor:not-allowed; }
+.num-stepper input {
+    width:44px; text-align:center;
+    background:transparent; border:none;
+    color:#e4e4e7; font-size:14px; font-weight:600;
+    font-family:inherit; outline:none;
+    border-left:1px solid rgba(255,255,255,0.06);
+    border-right:1px solid rgba(255,255,255,0.06);
+    padding:6px 0;
+    -moz-appearance:textfield;
+}
+.num-stepper input::-webkit-outer-spin-button,
+.num-stepper input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.opt-hint { font-size:11px; color:#52525b; margin-left:8px; }
+.diff-select {
+    width:100%;
+    background:rgba(255,255,255,0.03);
+    border:1px solid rgba(255,255,255,0.08);
+    border-radius:8px; padding:7px 10px;
+    color:#e4e4e7; font-size:13px; font-family:inherit;
+    outline:none; cursor:pointer;
+    appearance:none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%2371717a' d='M0 0l5 6 5-6z'/></svg>");
+    background-repeat:no-repeat;
+    background-position:right 10px center;
+    padding-right:28px;
+}
+.diff-select:focus { border-color:rgba(99,102,241,0.4); }
+.diff-select option { background:#18181b; color:#e4e4e7; }
+
+.topic-picker {
+    margin-top:16px; text-align:left;
     border:1px solid rgba(255,255,255,0.06);
     border-radius:12px; overflow:hidden;
 }
@@ -385,6 +448,29 @@ body {
                 </div>
             </div>
 
+            <div class="session-options">
+                <div class="opt-cell">
+                    <div class="opt-label">Number of new questions</div>
+                    <div class="opt-row">
+                        <div class="num-stepper">
+                            <button type="button" id="btn-n-down" onclick="adjustNNew(-1)">−</button>
+                            <input type="number" id="input-n-new" value="{{DAILY_NEW}}" min="1" max="15" oninput="onNNewChange()">
+                            <button type="button" id="btn-n-up" onclick="adjustNNew(1)">+</button>
+                        </div>
+                        <span class="opt-hint">+ {{DAILY_RECALL}} recall</span>
+                    </div>
+                </div>
+                <div class="opt-cell">
+                    <div class="opt-label">Difficulty</div>
+                    <select class="diff-select" id="select-difficulty" onchange="onDifficultyChange()">
+                        <option value="3" selected>3 — Standard A-Level</option>
+                        <option value="4">4 — Difficult A-Level</option>
+                        <option value="5">5 — Very Difficult A-Level</option>
+                        <option value="6">6 — Extremely Difficult A-Level</option>
+                    </select>
+                </div>
+            </div>
+
             <div class="topic-picker" id="topic-picker">
                 <div class="topic-picker-header" onclick="toggleTopicPicker()">
                     <div style="display:flex; align-items:center; gap:8px;">
@@ -401,7 +487,7 @@ body {
                         <div class="topic-list-empty">Loading topics...</div>
                     </div>
                     <div class="topic-picker-actions">
-                        <span class="topic-hint">Pick up to {{DAILY_NEW}} topics. Leave empty to auto-pick weakest.</span>
+                        <span class="topic-hint" id="topic-hint">Pick up to {{DAILY_NEW}} topics. Leave empty to auto-pick weakest.</span>
                         <button class="btn btn-ghost" onclick="clearTopicSelection()">Clear</button>
                     </div>
                 </div>
@@ -529,7 +615,36 @@ let buildPollTimer = null;
 let consolidateSaveTimer = null;
 let allTopics = [];
 let selectedTopicIds = new Set();
-const MAX_TOPICS = DAILY_NEW;
+function getNNew() {
+    const v = parseInt(document.getElementById('input-n-new').value, 10);
+    if (!Number.isFinite(v)) return DAILY_NEW;
+    return Math.max(1, Math.min(15, v));
+}
+function getDifficulty() {
+    const v = parseInt(document.getElementById('select-difficulty').value, 10);
+    return [3,4,5,6].includes(v) ? v : 3;
+}
+function adjustNNew(delta) {
+    const el = document.getElementById('input-n-new');
+    el.value = Math.max(1, Math.min(15, getNNew() + delta));
+    onNNewChange();
+}
+function onNNewChange() {
+    const n = getNNew();
+    document.getElementById('input-n-new').value = n;
+    document.getElementById('btn-n-down').disabled = n <= 1;
+    document.getElementById('btn-n-up').disabled = n >= 15;
+    const hintEl = document.getElementById('topic-hint');
+    if (hintEl) hintEl.textContent = `Pick up to ${n} topics. Leave empty to auto-pick weakest.`;
+    // If user already selected more topics than the new cap, trim from the most recent
+    if (selectedTopicIds.size > n) {
+        const arr = Array.from(selectedTopicIds);
+        selectedTopicIds = new Set(arr.slice(0, n));
+        if (allTopics.length) renderTopicList();
+    }
+    updateTopicCounter();
+}
+function onDifficultyChange() { /* no UI to update yet, just a reactive hook */ }
 
 function toast(msg, isError) {
     const el = document.getElementById('status-toast');
@@ -756,9 +871,10 @@ function renderTopicList() {
 }
 
 function toggleTopic(id, checked) {
+    const cap = getNNew();
     if (checked) {
-        if (selectedTopicIds.size >= MAX_TOPICS) {
-            toast(`At most ${MAX_TOPICS} topics per session.`, true);
+        if (selectedTopicIds.size >= cap) {
+            toast(`At most ${cap} topics per session. Increase the question count to add more.`, true);
             renderTopicList();
             return;
         }
@@ -784,7 +900,7 @@ function updateTopicCounter() {
         el.textContent = 'Auto: weakest topics';
         el.classList.remove('active');
     } else {
-        el.textContent = `${n} / ${MAX_TOPICS} selected`;
+        el.textContent = `${n} / ${getNNew()} selected`;
         el.classList.add('active');
     }
 }
@@ -811,12 +927,14 @@ async function checkResume() {
 async function startSession() {
     setLoading('btn-start', true);
     const topicIds = Array.from(selectedTopicIds);
-    const expectedCount = topicIds.length || DAILY_NEW;
+    const nNew = getNNew();
+    const difficulty = getDifficulty();
+    const expectedCount = topicIds.length || nNew;
     document.getElementById('build-progress').classList.add('active');
     document.getElementById('build-progress-count').textContent = `Preparing ${expectedCount} new questions...`;
     document.getElementById('build-progress-current').textContent = '';
     try {
-        const body = {};
+        const body = {n_new: nNew, difficulty: difficulty};
         if (SUBJECT_ID) body.subject_id = parseInt(SUBJECT_ID, 10);
         if (topicIds.length) body.topic_ids = topicIds;
         const res = await fetch('/api/study/start', {
@@ -1179,8 +1297,9 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-/* On load: check for resumable session */
+/* On load: check for resumable session and prime stepper button state */
 checkResume();
+onNNewChange();
 </script>
 </body>
 </html>'''
