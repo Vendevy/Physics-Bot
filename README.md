@@ -71,31 +71,59 @@ Shell shortcuts (each one cd's into the project, activates `.venv`, and runs the
 
 Open `http://localhost:5050` after `dashboard.sh`.
 
-**Dashboard tab** — overall mastery %, per-topic mastery tree, recent attempts (expandable to see your answer + grader feedback), subject selector. A **Resume** button appears in the header whenever an unfinished study session exists.
+The header has three navigation buttons: **Dashboard**, **Study**, **Notebook**, plus a subject selector. A yellow **Resume** button appears whenever an unfinished study session exists for the current subject.
 
-**Study tab** (`Study` button → `/study`):
-- **Topic picker** — collapsible panel on the start screen. Search and tick up to 7 specific topics, or leave empty to fall back to "weakest topics" auto-selection.
-- **Live build progress** — questions are generated in parallel; the UI streams "3/7 — 4.2.1 Stationary waves" as each one finishes.
-- **Streaming grader** — feedback streams token-by-token via SSE; you don't sit on a blank spinner.
-- **Charts** — when the model decides a question genuinely needs a graph (e.g. v–t analysis, IV characteristics), it emits structured data which is rendered with Chart.js inline beside the question.
-- **Autosave** — every keystroke in the answer box is saved to `localStorage`; close the tab and your draft is still there.
-- **Resume / discard** — close the tab mid-session and a banner offers Resume (jumps to the first unanswered question) or Discard.
-- **Flag** — per-question button to mark broken / OCR-mangled / disputed questions for later review.
+### Dashboard
+Overall mastery %, per-topic mastery tree (paper → module → topic-group → leaf, mastery-coloured), and a recent-attempts list (expandable to see your answer + grader feedback). Each attempt row shows the elapsed time alongside the date.
+
+### Study (`/study`)
+
+Two modes selectable on the start screen:
+
+#### Daily Session
+- **Number of questions** — stepper input, 1–15 (defaults to `DAILY_NEW`). Plus the recall set is appended as before.
+- **Difficulty selector** — four levels:
+  1. **3 — Standard A-Level** (default, exam-typical)
+  2. **4 — Difficult A-Level** (harder Section B style)
+  3. **5 — Very Difficult A-Level** (top 10% of exam questions)
+  4. **6 — Extremely Difficult A-Level** (BPhO-style stretch, but strictly within the spec)
+- **Topic picker** — collapsible search-and-tick of leaf topics. Pick up to N (= chosen question count) specific topics, or leave empty to auto-pick the weakest.
+- **Live build progress** — questions generated in parallel; the UI streams "3/7 — 4.2.1 Stationary waves" as each one finishes.
+- **Streaming grader** — feedback streams token-by-token via SSE.
+- **Charts (Chart.js)** — when a question genuinely needs a graph (e.g. v–t analysis, IV characteristics, decay curve), the model emits structured data and the chart is rendered inline beside the question.
+- **Autosave** — every keystroke is saved to `localStorage`.
+- **Resume / discard** — close the tab and a banner offers Resume or Discard.
+- **Flag** — per-question button to mark broken / OCR-mangled / disputed questions.
+- **Time tracking** — wall-clock per question is logged on every attempt.
 - **Review & Consolidate** — at the end, walk back through every question with the markscheme, your answer, and the feedback. You must type a consolidation note before advancing — notes are persisted per-question.
+
+#### Mock Paper
+- Pick a past paper from the dropdown. The picker lists every paper with extracted questions, with per-paper question count and total marks.
+- Sit the paper end-to-end with a sticky **count-up timer**. **No mid-session feedback** — submission saves the answer and advances to the next question.
+- "Finish & Submit Paper" on the last question batch-grades every answer in parallel and shows total awarded / possible.
+- Review & Consolidate works the same as daily mode.
+
+#### Other UX
+- **Subject lock** — generated questions are explicitly framed in the active subject; even subject-agnostic topic titles ("Evaluation of experimental method", "Significant figures") get physics scenarios in physics sessions.
+- **Calculus rule** (physics only) — the OCR H556 spec doesn't include calculus, so the prompt forbids dx/dt notation, integrals, and differential equations in both the question and the markscheme. Maths sessions are unaffected.
 - **Keyboard shortcuts** — Ctrl+Enter submits, →/← navigate the review modal, Esc closes it.
 - **KaTeX** — LaTeX in question/markscheme/feedback (`$...$` and `$$...$$`) renders inline.
+
+### Notebook (`/notebook`)
+Surfaces every consolidation note you've written, grouped by topic, newest first. Each entry includes the marks chip, paper-question source, date, an expandable "Question" excerpt, and your note rendered as markdown.
 
 ## How it works
 
 | Job | Model | Why |
 |---|---|---|
 | Spec / past-paper extraction | Gemini 2.5 Flash (or Claude Haiku) | Native PDF parsing, very cheap |
-| Generating new questions | Claude Sonnet 4.6 | Best at mimicking exam style and calibrating difficulty to current mastery |
+| Generating new questions | Claude Sonnet 4.6 | Best at mimicking exam style and calibrating difficulty |
 | Grading answers | Claude Sonnet 4.6 | Reliable partial credit + actionable feedback |
-| Dashboard / progress | No LLM | SQLite queries + HTML |
+| Dashboard / progress / notebook | No LLM | SQLite queries + HTML |
 
 - **SM-2** spaced repetition per topic (ease, interval, repetitions). Mastery score is a 0–1 EMA of recent grades, used to pick "weakest" topics.
-- **Daily set** — `DAILY_NEW=7` generated questions on the weakest topics + `DAILY_RECALL=3` past-paper questions due for spaced recall (override the constants in `studybot/config.py`).
+- **Daily set** — by default `DAILY_NEW=7` generated questions on the weakest topics + `DAILY_RECALL=3` past-paper questions due for spaced recall (override the constants in `studybot/config.py`, or change per-session via the start-screen stepper).
+- **Mock-paper set** — every question from a chosen past paper, in original order. Batch-graded at the end.
 - **Files API caching** — uploaded PDFs are tracked in `files_cache` so you don't re-upload between runs.
 - **Prompt caching** — the grader splits the question + markscheme (cached) from the student answer (uncached), so re-grades on the same question hit cache.
 
