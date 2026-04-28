@@ -4,3 +4,7 @@ data/*.db-journal
 __pycache__/
 *.pyc
 .venv/
+
+# Past-paper PDFs are copyrighted exam-board material. Bring your own.
+Physics Past Papers/
+Mathematics Past Papers/
