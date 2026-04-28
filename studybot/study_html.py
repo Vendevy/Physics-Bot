@@ -1082,6 +1082,7 @@ function renderReviewCard() {
     tagEl.textContent = result;
     tagEl.style.color = color;
     document.getElementById('review-question').innerHTML = markdownToHtml(item.text);
+    renderFigure(item.figure, 'review-figure');
     document.getElementById('review-answer').innerHTML = markdownToHtml(item.user_answer);
     document.getElementById('review-markscheme').innerHTML = markdownToHtml(item.markscheme);
     document.getElementById('review-feedback').innerHTML = markdownToHtml(item.feedback);
