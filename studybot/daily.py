@@ -57,10 +57,16 @@ GEN_SCHEMA = {
     "required": ["text", "marks", "markscheme", "figure"],
 }
 
-GEN_SYSTEM = """You are an A-Level examiner generating a fresh practice question on a specific topic.
+def _gen_system(subject_name: str, board: str) -> str:
+    return f"""You are an examiner for {subject_name} ({board}) generating a fresh practice question on a specific topic from the official specification.
+
+CRITICAL — subject lock:
+- EVERY question MUST be a {subject_name} question. Never produce a question from another subject (psychology, biology, chemistry outside of physics chemistry crossover, etc.) even if the topic title sounds generic.
+- Topics with generic-sounding titles ("Evaluation of experimental method", "Significant figures", "Mathematical skills for analysis", "Identification of variables", etc.) MUST still be framed inside a {subject_name} context — use a physics scenario such as mechanics, electricity, waves, materials, fields, thermodynamics, nuclear, quantum, or astrophysics. If the topic is about practical/experimental skills, base the experiment on a physics setup (resistance of a wire, refractive index, period of a pendulum, specific heat capacity, radioactive decay, Young's modulus, etc.).
+- Use SI units, physics quantities, and physics terminology throughout.
 
 Rules:
-- Match the style, difficulty, and structure of the official exam board's questions.
+- Match the style, difficulty, and structure of official {board} {subject_name} exam questions.
 - Pitch difficulty for a student whose current mastery on this topic is given (0=novice, 1=mastered).
 - Include any data/values needed to solve it (don't write open-ended definition prompts).
 - The markscheme must enumerate marking points with how each mark is awarded.
@@ -159,17 +165,19 @@ def pick_due_for_recall(subject_id: int, n: int) -> list[dict]:
         return results
 
 
-def generate_question(topic: dict) -> dict:
+def generate_question(topic: dict, *, subject_name: str, board: str) -> dict:
     """Generate one fresh question for a topic. Returns dict with text, marks, markscheme."""
     score = topic.get("score", 0.0) or 0.0
     user_text = (
+        f"Subject: {subject_name} ({board})\n"
         f"Topic: {topic['code']} — {topic['title']}\n"
         f"Spec content: {topic['content']}\n"
         f"Student's current mastery on this topic: {score:.2f}\n\n"
-        "Generate one practice question."
+        f"Generate one {subject_name} practice question on this topic. "
+        f"Remember: the question must be a {subject_name} question, never from another subject."
     )
     return llm.call_json(
-        system=GEN_SYSTEM,
+        system=_gen_system(subject_name, board),
         user_blocks=[llm.text_block(user_text)],
         schema=GEN_SCHEMA,
         cache_system=True,
@@ -193,6 +201,15 @@ def build_session(
     `progress_cb(done, total, label)` is called as each question finishes generating,
     so callers (e.g. the web UI) can stream status to the user.
     """
+    with connect() as conn:
+        subject = conn.execute(
+            "SELECT name, board FROM subjects WHERE id = ?", (subject_id,)
+        ).fetchone()
+    if not subject:
+        raise RuntimeError(f"Subject id {subject_id} not found")
+    subject_name = subject["name"]
+    board = subject["board"]
+
     if topic_ids:
         weak = pick_topics_by_id(subject_id, topic_ids)[:DAILY_NEW]
     else:
@@ -208,7 +225,10 @@ def build_session(
     total = len(weak)
     generated_map: dict[int, tuple[dict, dict]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(generate_question, t): (i, t) for i, t in enumerate(weak)}
+        futures = {
+            ex.submit(generate_question, t, subject_name=subject_name, board=board): (i, t)
+            for i, t in enumerate(weak)
+        }
         done = 0
         for fut in as_completed(futures):
             i, t = futures[fut]
