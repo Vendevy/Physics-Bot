@@ -114,12 +114,13 @@ def record_attempt(
     position: int | None,
     user_answer: str,
     grade_result: dict,
+    time_spent_seconds: int | None = None,
 ) -> int:
     """Persist the attempt + update SM-2 + mastery for all topics this question covers."""
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO attempts(question_id, user_answer, marks_awarded, total_marks, sm2_grade, feedback) "
-            "VALUES(?,?,?,?,?,?) RETURNING id",
+            "INSERT INTO attempts(question_id, user_answer, marks_awarded, total_marks, sm2_grade, feedback, time_spent_seconds) "
+            "VALUES(?,?,?,?,?,?,?) RETURNING id",
             (
                 question_id,
                 user_answer,
@@ -127,6 +128,7 @@ def record_attempt(
                 grade_result["total_marks"],
                 grade_result["sm2_grade"],
                 grade_result["feedback"],
+                time_spent_seconds,
             ),
         )
         attempt_id = cur.fetchone()["id"]

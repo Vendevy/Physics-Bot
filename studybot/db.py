@@ -78,7 +78,8 @@ CREATE TABLE IF NOT EXISTS attempts (
     marks_awarded INTEGER NOT NULL,
     total_marks INTEGER NOT NULL,
     sm2_grade INTEGER NOT NULL,             -- 0..5
-    feedback TEXT
+    feedback TEXT,
+    time_spent_seconds INTEGER              -- wall-clock from question shown to submit
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_question ON attempts(question_id);
 
@@ -86,7 +87,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY,
     subject_id INTEGER NOT NULL REFERENCES subjects(id),
     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at TEXT
+    completed_at TEXT,
+    mode TEXT NOT NULL DEFAULT 'daily',     -- 'daily' or 'mock_paper'
+    paper_id INTEGER REFERENCES papers(id)  -- only set for mock_paper sessions
 );
 
 CREATE TABLE IF NOT EXISTS session_questions (
@@ -134,6 +137,14 @@ def migrate() -> None:
             conn.execute("ALTER TABLE questions ADD COLUMN flag_reason TEXT")
         if "figure" not in q_cols:
             conn.execute("ALTER TABLE questions ADD COLUMN figure TEXT")
+        a_cols = {r["name"] for r in conn.execute("PRAGMA table_info(attempts)").fetchall()}
+        if "time_spent_seconds" not in a_cols:
+            conn.execute("ALTER TABLE attempts ADD COLUMN time_spent_seconds INTEGER")
+        s_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "mode" not in s_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'daily'")
+        if "paper_id" not in s_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN paper_id INTEGER REFERENCES papers(id)")
         conn.commit()
 
 
