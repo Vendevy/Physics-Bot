@@ -344,3 +344,38 @@ def build_session(
         conn.commit()
 
     return session_id
+
+
+def build_mock_session(subject_id: int, paper_id: int) -> int:
+    """Create a mock-paper session: every question from the chosen past paper, in order."""
+    with connect() as conn:
+        paper = conn.execute(
+            "SELECT id, label FROM papers WHERE id = ? AND subject_id = ?",
+            (paper_id, subject_id),
+        ).fetchone()
+        if not paper:
+            raise RuntimeError(f"Paper {paper_id} not found for subject {subject_id}")
+        questions = conn.execute(
+            """
+            SELECT id, qnum FROM questions
+            WHERE paper_id = ? AND subject_id = ?
+            ORDER BY id
+            """,
+            (paper_id, subject_id),
+        ).fetchall()
+        if not questions:
+            raise RuntimeError(f"No questions tagged to paper {paper['label']}")
+
+        cur = conn.execute(
+            "INSERT INTO sessions(subject_id, mode, paper_id) VALUES(?, 'mock_paper', ?) RETURNING id",
+            (subject_id, paper_id),
+        )
+        session_id = cur.fetchone()["id"]
+        for position, q in enumerate(questions):
+            conn.execute(
+                "INSERT INTO session_questions(session_id, question_id, kind, position) "
+                "VALUES(?,?,?,?)",
+                (session_id, q["id"], "mock", position),
+            )
+        conn.commit()
+    return session_id

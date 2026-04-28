@@ -193,6 +193,50 @@ body {
 .resume-text { font-size:13px; color:#fde68a; }
 .resume-actions { display:flex; gap:8px; }
 
+.mode-toggle {
+    display:flex; gap:6px; padding:4px;
+    background:rgba(255,255,255,0.03);
+    border:1px solid rgba(255,255,255,0.06);
+    border-radius:10px;
+    margin-top:24px; margin-bottom:8px;
+}
+.mode-toggle button {
+    flex:1; background:transparent; border:none; cursor:pointer;
+    color:#71717a; font-family:inherit; font-size:13px; font-weight:500;
+    padding:8px 12px; border-radius:7px;
+    transition:background 0.15s, color 0.15s;
+}
+.mode-toggle button.active {
+    background:rgba(99,102,241,0.15); color:#e4e4e7;
+}
+.mode-toggle button:hover:not(.active) { color:#a1a1aa; }
+
+.paper-picker {
+    margin-top:16px; text-align:left;
+    background:rgba(255,255,255,0.02);
+    border:1px solid rgba(255,255,255,0.06);
+    border-radius:10px; padding:14px 16px;
+    display:none;
+}
+.paper-picker.active { display:block; }
+.paper-picker .opt-label { margin-bottom:8px; }
+.paper-meta {
+    margin-top:8px; font-size:12px; color:#52525b;
+    font-variant-numeric:tabular-nums;
+}
+
+.mock-timer {
+    position:sticky; top:64px; z-index:30;
+    margin:0 auto 16px;
+    background:rgba(99,102,241,0.08);
+    border:1px solid rgba(99,102,241,0.25);
+    border-radius:10px; padding:8px 14px;
+    display:flex; align-items:center; justify-content:space-between;
+    font-variant-numeric:tabular-nums;
+}
+.mock-timer-label { font-size:11px; color:#818cf8; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; }
+.mock-timer-value { font-size:16px; font-weight:600; color:#e4e4e7; }
+
 .session-options {
     margin-top:24px; text-align:left;
     display:grid; grid-template-columns:1fr 1fr; gap:12px;
@@ -434,8 +478,8 @@ body {
         </div>
         <div class="card" style="padding:48px 32px;">
             <div class="empty-state" style="padding:0;">
-                <h2>Ready to study?</h2>
-                <p>Each session generates up to {{DAILY_NEW}} fresh questions<br>plus {{DAILY_RECALL}} past-paper questions for spaced review.</p>
+                <h2 id="start-heading">Ready to study?</h2>
+                <p id="start-blurb">Each session generates up to {{DAILY_NEW}} fresh questions<br>plus {{DAILY_RECALL}} past-paper questions for spaced review.</p>
                 <div class="start-btn-wrap">
                     <button class="btn btn-primary" id="btn-start" onclick="startSession()" style="padding:12px 28px; font-size:15px;">
                         Start Session
@@ -448,6 +492,20 @@ body {
                 </div>
             </div>
 
+            <div class="mode-toggle">
+                <button id="mode-daily" class="active" onclick="setMode('daily')">Daily Session</button>
+                <button id="mode-mock" onclick="setMode('mock')">Mock Paper</button>
+            </div>
+
+            <div class="paper-picker" id="paper-picker">
+                <div class="opt-label">Choose a past paper</div>
+                <select class="diff-select" id="select-paper" onchange="onPaperChange()">
+                    <option value="">Loading papers…</option>
+                </select>
+                <div class="paper-meta" id="paper-meta"></div>
+            </div>
+
+            <div id="daily-options-wrap">
             <div class="session-options">
                 <div class="opt-cell">
                     <div class="opt-label">Number of new questions</div>
@@ -492,11 +550,16 @@ body {
                     </div>
                 </div>
             </div>
+            </div><!-- /daily-options-wrap -->
         </div>
     </div>
 
     <!-- QUESTION SCREEN -->
     <div id="question-screen" style="display:none;">
+        <div class="mock-timer" id="mock-timer" style="display:none;">
+            <span class="mock-timer-label">Mock paper — elapsed</span>
+            <span class="mock-timer-value" id="mock-timer-value">0:00</span>
+        </div>
         <div class="section-label" id="progress-label">Question 1 / 10</div>
         <div class="progress-track"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
 
@@ -615,6 +678,13 @@ let buildPollTimer = null;
 let consolidateSaveTimer = null;
 let allTopics = [];
 let selectedTopicIds = new Set();
+let questionShownAt = null;  // ms timestamp when current question was rendered
+
+let sessionMode = 'daily'; // 'daily' or 'mock'
+let allPapers = [];
+let mockAnswers = [];      // {position, answer, time_spent_seconds}
+let mockTimerStart = null; // ms
+let mockTimerHandle = null;
 function getNNew() {
     const v = parseInt(document.getElementById('input-n-new').value, 10);
     if (!Number.isFinite(v)) return DAILY_NEW;
@@ -819,6 +889,79 @@ function clearAutosave(pos) {
     try { localStorage.removeItem(autosaveKey(pos)); } catch (e) {}
 }
 
+/* ----- Mode toggle (daily / mock) ----- */
+function setMode(mode) {
+    sessionMode = mode;
+    document.getElementById('mode-daily').classList.toggle('active', mode === 'daily');
+    document.getElementById('mode-mock').classList.toggle('active', mode === 'mock');
+    document.getElementById('daily-options-wrap').style.display = mode === 'daily' ? 'block' : 'none';
+    document.getElementById('paper-picker').classList.toggle('active', mode === 'mock');
+    if (mode === 'mock') {
+        document.getElementById('start-heading').textContent = 'Mock paper';
+        document.getElementById('start-blurb').innerHTML = 'Sit a full past paper end-to-end with a count-up timer. No mid-session feedback — answers are graded all at once at the end.';
+        document.getElementById('btn-start').firstChild.textContent = 'Start Mock Paper ';
+        if (allPapers.length === 0) loadPapers();
+    } else {
+        document.getElementById('start-heading').textContent = 'Ready to study?';
+        document.getElementById('start-blurb').innerHTML = `Each session generates up to ${DAILY_NEW} fresh questions<br>plus ${DAILY_RECALL} past-paper questions for spaced review.`;
+        document.getElementById('btn-start').firstChild.textContent = 'Start Session ';
+    }
+}
+
+async function loadPapers() {
+    const url = '/api/papers' + (SUBJECT_ID ? `?subject_id=${encodeURIComponent(SUBJECT_ID)}` : '');
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Failed to load papers');
+        allPapers = data.papers || [];
+        const sel = document.getElementById('select-paper');
+        if (allPapers.length === 0) {
+            sel.innerHTML = '<option value="">No papers available — extract questions first</option>';
+            document.getElementById('paper-meta').textContent = '';
+            return;
+        }
+        sel.innerHTML = allPapers.map((p, i) =>
+            `<option value="${p.id}">${escapeHtml(p.label)} — ${p.n_questions} Qs · ${p.total_marks} marks</option>`
+        ).join('');
+        onPaperChange();
+    } catch (e) {
+        document.getElementById('select-paper').innerHTML = `<option value="">Error: ${escapeHtml(e.message)}</option>`;
+    }
+}
+
+function onPaperChange() {
+    const sel = document.getElementById('select-paper');
+    const id = parseInt(sel.value, 10);
+    const p = allPapers.find(x => x.id === id);
+    document.getElementById('paper-meta').textContent =
+        p ? `${p.n_questions} questions · ${p.total_marks} marks` : '';
+}
+
+function fmtMMSS(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+function startMockTimer() {
+    mockTimerStart = Date.now();
+    document.getElementById('mock-timer').style.display = 'flex';
+    if (mockTimerHandle) clearInterval(mockTimerHandle);
+    mockTimerHandle = setInterval(() => {
+        document.getElementById('mock-timer-value').textContent =
+            fmtMMSS(Date.now() - mockTimerStart);
+    }, 1000);
+}
+
+function stopMockTimer() {
+    if (mockTimerHandle) { clearInterval(mockTimerHandle); mockTimerHandle = null; }
+    document.getElementById('mock-timer').style.display = 'none';
+}
+
 /* ----- Topic picker ----- */
 function toggleTopicPicker() {
     const el = document.getElementById('topic-picker');
@@ -925,6 +1068,7 @@ async function checkResume() {
 }
 
 async function startSession() {
+    if (sessionMode === 'mock') return startMockSession();
     setLoading('btn-start', true);
     const topicIds = Array.from(selectedTopicIds);
     const nNew = getNNew();
@@ -950,6 +1094,39 @@ async function startSession() {
         setLoading('btn-start', false);
         document.getElementById('build-progress').classList.remove('active');
     }
+}
+
+async function startMockSession() {
+    const sel = document.getElementById('select-paper');
+    const paperId = parseInt(sel.value, 10);
+    if (!Number.isFinite(paperId)) {
+        toast('Pick a paper first.', true);
+        return;
+    }
+    setLoading('btn-start', true);
+    try {
+        const body = {paper_id: paperId};
+        if (SUBJECT_ID) body.subject_id = parseInt(SUBJECT_ID, 10);
+        const res = await fetch('/api/study/mock-start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Failed to start mock');
+        sessionId = data.session_id;
+        questions = data.questions;
+        currentPos = 0;
+        attempts = [];
+        mockAnswers = new Array(questions.length).fill(null).map(() => ({answer: '', time_spent_seconds: 0}));
+        document.getElementById('start-screen').style.display = 'none';
+        document.getElementById('question-screen').style.display = 'block';
+        startMockTimer();
+        showQuestion();
+    } catch (e) {
+        toast(e.message, true);
+    }
+    setLoading('btn-start', false);
 }
 
 function pollBuild(buildId) {
@@ -1035,18 +1212,33 @@ function showQuestion() {
     document.getElementById('marks-display').textContent = q.marks + (q.marks === 1 ? ' mark' : ' marks');
     document.getElementById('question-text').innerHTML = markdownToHtml(q.text);
     renderFigure(q.figure, 'question-figure');
-    // Restore any autosaved draft
-    document.getElementById('answer-input').value = loadAutosave(currentPos);
+    // Restore any autosaved draft (or, in mock mode, the previously-typed answer)
+    let restored = '';
+    if (sessionMode === 'mock' && mockAnswers[currentPos] && mockAnswers[currentPos].answer) {
+        restored = mockAnswers[currentPos].answer;
+    } else {
+        restored = loadAutosave(currentPos);
+    }
+    document.getElementById('answer-input').value = restored;
     document.getElementById('answer-input').focus();
+    // Submit-button label varies by mode
+    const submitBtn = document.getElementById('btn-submit');
+    if (submitBtn && submitBtn.firstChild) {
+        submitBtn.firstChild.textContent = sessionMode === 'mock'
+            ? (currentPos >= questions.length - 1 ? 'Finish & Submit Paper ' : 'Save & Next ')
+            : 'Submit Answer ';
+    }
     // Reset flag UI
     const flagBtn = document.getElementById('btn-flag');
     flagBtn.classList.remove('flagged');
     document.getElementById('flag-label').textContent = 'Flag';
     renderMath(document.getElementById('question-text'));
+    questionShownAt = Date.now();
 }
 
 /* ----- Submit (with streaming feedback, fix #17) ----- */
 async function submitAnswer() {
+    if (sessionMode === 'mock') return submitMockAnswer();
     const answer = document.getElementById('answer-input').value.trim();
     if (!answer) { toast('Please type an answer before submitting.', true); return; }
     const q = questions[currentPos];
@@ -1066,10 +1258,16 @@ async function submitAnswer() {
     let buffer = '';
     let finalResult = null;
     try {
+        const elapsed = questionShownAt ? Math.max(0, Math.floor((Date.now() - questionShownAt) / 1000)) : null;
         const res = await fetch('/api/study/submit-stream', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({session_id: sessionId, position: currentPos, answer: answer}),
+            body: JSON.stringify({
+                session_id: sessionId,
+                position: currentPos,
+                answer: answer,
+                time_spent_seconds: elapsed,
+            }),
         });
         if (!res.ok || !res.body) throw new Error('Stream failed');
         const reader = res.body.getReader();
@@ -1113,6 +1311,59 @@ async function submitAnswer() {
         document.getElementById('question-screen').style.display = 'block';
     }
     setLoading('btn-submit', false);
+}
+
+/** Mock paper: store the answer locally and advance — no grading until Finish. */
+function submitMockAnswer() {
+    const answer = document.getElementById('answer-input').value;
+    const elapsed = questionShownAt
+        ? Math.max(0, Math.floor((Date.now() - questionShownAt) / 1000))
+        : 0;
+    mockAnswers[currentPos] = {
+        answer: (answer || '').trim(),
+        time_spent_seconds: (mockAnswers[currentPos].time_spent_seconds || 0) + elapsed,
+    };
+    clearAutosave(currentPos);
+    if (currentPos >= questions.length - 1) {
+        finishMockSession();
+    } else {
+        currentPos++;
+        showQuestion();
+    }
+}
+
+async function finishMockSession() {
+    stopMockTimer();
+    document.getElementById('question-screen').style.display = 'none';
+    document.getElementById('done-screen').style.display = 'block';
+    const summary = document.getElementById('done-summary');
+    summary.innerHTML = `Grading ${questions.length} questions in parallel… <span class="spinner" style="display:inline-block;vertical-align:middle;"></span>`;
+    document.getElementById('done-screen').querySelector('.start-btn-wrap').style.display = 'none';
+    try {
+        const res = await fetch('/api/study/mock-submit', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                session_id: sessionId,
+                attempts: mockAnswers.map((a, i) => ({
+                    position: i,
+                    answer: a.answer,
+                    time_spent_seconds: a.time_spent_seconds,
+                })),
+            }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Grading failed');
+        const pct = data.total_possible
+            ? Math.round((data.total_awarded / data.total_possible) * 100)
+            : 0;
+        summary.innerHTML =
+            `Mock complete. <strong>${data.total_awarded} / ${data.total_possible}</strong> (${pct}%) ` +
+            `over ${data.graded_count} answered question${data.graded_count !== 1 ? 's' : ''}.`;
+        document.getElementById('done-screen').querySelector('.start-btn-wrap').style.display = '';
+    } catch (e) {
+        summary.textContent = `Error: ${e.message}`;
+    }
 }
 
 /** Extract anything after FEEDBACK: from a streaming partial response. */

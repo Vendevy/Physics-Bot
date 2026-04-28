@@ -15,14 +15,41 @@ from urllib.parse import parse_qs, urlparse
 
 from . import config
 from .db import connect, migrate
-from .daily import build_session
+from concurrent.futures import ThreadPoolExecutor
+
+from .daily import build_session, build_mock_session
 from .grade import grade_answer, grade_answer_stream, record_attempt
 from .study_html import STUDY_HTML
+from . import notebook_html
 
 # In-memory progress state for streaming session-build status.
 # Keyed by build_id; each entry is {"events": [...], "done": bool, "session_id": int|None, "error": str|None}
 _BUILDS: dict[str, dict] = {}
 _BUILDS_LOCK = threading.Lock()
+
+
+def _parse_time_spent(v) -> int | None:
+    if v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    if n < 0 or n > 24 * 3600:
+        return None
+    return n
+
+
+def _format_time(seconds: int | None) -> str:
+    if seconds is None or seconds < 0:
+        return "—"
+    if seconds < 60:
+        return f"{seconds}s"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
 
 PORT = 5050
 
@@ -164,7 +191,8 @@ def _get_recent_attempts(conn: sqlite3.Connection, subject_id: int, limit: int =
     rows = conn.execute(
         """
         SELECT a.id, a.answered_at, a.user_answer, a.marks_awarded, a.total_marks,
-               a.sm2_grade, a.feedback, q.id AS qid, q.text AS question_text,
+               a.sm2_grade, a.feedback, a.time_spent_seconds,
+               q.id AS qid, q.text AS question_text,
                q.qnum, q.source, q.marks AS q_marks,
                GROUP_CONCAT(t.code || ' ' || t.title, ' | ') AS topics
         FROM attempts a
@@ -336,6 +364,7 @@ def _build_html(subject_id: int | None = None) -> str:
                     </div>
                     <div class="history-right">
                         <span class="history-paper">{source} {qnum}</span>
+                        <span class="history-time">{_format_time(h.get('time_spent_seconds'))}</span>
                         <span class="history-date">{date}</span>
                     </div>
                 </summary>
@@ -747,6 +776,14 @@ def _build_html(subject_id: int | None = None) -> str:
             color: #3f3f46;
             font-variant-numeric: tabular-nums;
         }}
+        .history-time {{
+            font-size: 11px;
+            color: #71717a;
+            font-variant-numeric: tabular-nums;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 2px 8px;
+            border-radius: 4px;
+        }}
         .history-detail {{
             padding: 0 16px 16px;
             border-top: 1px solid rgba(255, 255, 255, 0.04);
@@ -808,6 +845,10 @@ def _build_html(subject_id: int | None = None) -> str:
                 <a href="/study?subject={subject_id}" class="btn" style="text-decoration:none;">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
                     Study
+                </a>
+                <a href="/notebook?subject={subject_id}" class="btn" style="text-decoration:none;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    Notebook
                 </a>
                 <button class="btn" onclick="location.reload()">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
@@ -904,6 +945,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(html.encode())
+        elif path == "/notebook":
+            self._handle_notebook(qs)
         elif path == "/api/study/complete":
             self._handle_study_complete(qs)
         elif path == "/api/study/build-status":
@@ -912,6 +955,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_study_resume(qs)
         elif path == "/api/study/topics":
             self._handle_study_topics(qs)
+        elif path == "/api/papers":
+            self._handle_papers(qs)
         else:
             self.send_error(404)
 
@@ -929,6 +974,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_study_flag()
         elif path == "/api/study/discard":
             self._handle_study_discard()
+        elif path == "/api/study/mock-start":
+            self._handle_mock_start()
+        elif path == "/api/study/mock-submit":
+            self._handle_mock_submit()
         else:
             self.send_error(404)
 
@@ -1124,6 +1173,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             session_id = data.get("session_id")
             position = data.get("position")
             answer = data.get("answer", "").strip()
+            time_spent = _parse_time_spent(data.get("time_spent_seconds"))
             if session_id is None or position is None:
                 self._send_json({"ok": False, "error": "Missing session_id or position"})
                 return
@@ -1144,6 +1194,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 position=position,
                 user_answer=answer,
                 grade_result=result,
+                time_spent_seconds=time_spent,
             )
             self._send_json({
                 "ok": True,
@@ -1195,14 +1246,193 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
 
+    def _handle_papers(self, qs: dict):
+        try:
+            requested = qs.get("subject_id", [None])[0]
+            if requested is not None:
+                try:
+                    requested = int(requested)
+                except ValueError:
+                    requested = None
+            subject_id = self._resolve_subject_id(requested)
+            if subject_id is None:
+                self._send_json({"ok": False, "error": "No subject"})
+                return
+            with connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT p.id, p.label,
+                           (SELECT COUNT(*) FROM questions q WHERE q.paper_id = p.id) AS n_questions,
+                           (SELECT COALESCE(SUM(q.marks), 0) FROM questions q WHERE q.paper_id = p.id) AS total_marks
+                    FROM papers p
+                    WHERE p.subject_id = ?
+                    ORDER BY p.label
+                    """,
+                    (subject_id,),
+                ).fetchall()
+            papers = [
+                {
+                    "id": r["id"],
+                    "label": r["label"],
+                    "n_questions": r["n_questions"],
+                    "total_marks": r["total_marks"],
+                }
+                for r in rows
+                if r["n_questions"] > 0
+            ]
+            self._send_json({"ok": True, "papers": papers})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_mock_start(self):
+        try:
+            data = self._read_json()
+            requested = data.get("subject_id")
+            if requested is not None:
+                try:
+                    requested = int(requested)
+                except (TypeError, ValueError):
+                    requested = None
+            subject_id = self._resolve_subject_id(requested)
+            if subject_id is None:
+                self._send_json({"ok": False, "error": "No subject"})
+                return
+            try:
+                paper_id = int(data.get("paper_id"))
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "error": "Missing or invalid paper_id"})
+                return
+            session_id = build_mock_session(subject_id, paper_id)
+            questions = self._fetch_session_questions(session_id)
+            with connect() as conn:
+                paper = conn.execute(
+                    "SELECT label FROM papers WHERE id = ?", (paper_id,)
+                ).fetchone()
+                total_marks = sum(q["marks"] for q in questions)
+            self._send_json({
+                "ok": True,
+                "session_id": session_id,
+                "questions": questions,
+                "paper_label": paper["label"] if paper else "",
+                "total_marks": total_marks,
+            })
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_mock_submit(self):
+        """Batch-grade every answer in a mock session in parallel.
+        Body: {session_id, attempts: [{position, answer, time_spent_seconds?}]}."""
+        try:
+            data = self._read_json()
+            session_id = data.get("session_id")
+            raw_attempts = data.get("attempts") or []
+            if session_id is None:
+                self._send_json({"ok": False, "error": "Missing session_id"})
+                return
+            with connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT sq.position, sq.question_id
+                    FROM session_questions sq
+                    WHERE sq.session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchall()
+            qid_by_pos = {r["position"]: r["question_id"] for r in rows}
+
+            jobs: list[tuple[int, int, str, int | None]] = []
+            for a in raw_attempts:
+                try:
+                    pos = int(a.get("position"))
+                except (TypeError, ValueError):
+                    continue
+                qid = qid_by_pos.get(pos)
+                if qid is None:
+                    continue
+                ans = (a.get("answer") or "").strip()
+                if not ans:
+                    continue  # skip blank answers
+                ts = _parse_time_spent(a.get("time_spent_seconds"))
+                jobs.append((pos, qid, ans, ts))
+
+            results: dict[int, dict] = {}
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                futures = {ex.submit(grade_answer, qid, ans): (pos, qid, ans, ts) for (pos, qid, ans, ts) in jobs}
+                for fut in futures:
+                    pos, qid, ans, ts = futures[fut]
+                    try:
+                        result = fut.result()
+                    except Exception as ge:
+                        results[pos] = {"error": str(ge)}
+                        continue
+                    record_attempt(
+                        question_id=qid,
+                        session_id=session_id,
+                        position=pos,
+                        user_answer=ans,
+                        grade_result=result,
+                        time_spent_seconds=ts,
+                    )
+                    results[pos] = result
+
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE sessions SET completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (session_id,),
+                )
+                conn.commit()
+
+            total_awarded = sum(r.get("marks_awarded", 0) for r in results.values() if "marks_awarded" in r)
+            total_possible = sum(r.get("total_marks", 0) for r in results.values() if "total_marks" in r)
+            self._send_json({
+                "ok": True,
+                "session_id": session_id,
+                "total_awarded": total_awarded,
+                "total_possible": total_possible,
+                "graded_count": sum(1 for r in results.values() if "marks_awarded" in r),
+            })
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_notebook(self, qs: dict):
+        try:
+            requested = qs.get("subject", [None])[0]
+            if requested is not None:
+                try:
+                    requested = int(requested)
+                except ValueError:
+                    requested = None
+            subject_id = self._resolve_subject_id(requested)
+            subjects = _get_subjects()
+            if subject_id is None or not subjects:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(_error_html("No subjects found.").encode())
+                return
+            subject = next((s for s in subjects if s["id"] == subject_id), subjects[0])
+            with connect() as conn:
+                entries = notebook_html.fetch_entries(conn, subject_id)
+            page = notebook_html.render(subject["name"], subject_id, subjects, entries)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(page.encode())
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(_error_html(f"Notebook error: {e}").encode())
+
     def _handle_study_submit_stream(self):
         """Stream the grader's output as Server-Sent Events.
-        Body: {session_id, position, answer}."""
+        Body: {session_id, position, answer, time_spent_seconds?}."""
         try:
             data = self._read_json()
             session_id = data.get("session_id")
             position = data.get("position")
             answer = data.get("answer", "").strip()
+            time_spent = _parse_time_spent(data.get("time_spent_seconds"))
             if session_id is None or position is None:
                 self._send_json({"ok": False, "error": "Missing session_id or position"})
                 return
@@ -1246,6 +1476,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 position=position,
                 user_answer=answer,
                 grade_result=final_result,
+                time_spent_seconds=time_spent,
             )
             emit({"type": "final", **final_result})
         except Exception as e:
