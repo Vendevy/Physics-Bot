@@ -1028,6 +1028,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 difficulty = 3
             if difficulty not in (3, 4, 5, 6):
                 difficulty = 3
+            use_past_paper_style = bool(data.get("use_past_paper_style", True))
 
             build_id = f"b{int(datetime.now().timestamp() * 1000)}"
             with _BUILDS_LOCK:
@@ -1044,6 +1045,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         topic_ids=topic_ids,
                         n_new=n_new,
                         difficulty=difficulty,
+                        use_past_paper_style=use_past_paper_style,
                         progress_cb=progress_cb,
                     )
                     with _BUILDS_LOCK:

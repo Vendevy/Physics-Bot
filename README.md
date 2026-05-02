@@ -84,9 +84,12 @@ Two modes selectable on the start screen:
 - **Number of questions** — stepper input, 1–15 (defaults to `DAILY_NEW`). Plus the recall set is appended as before.
 - **Difficulty selector** — four levels:
   1. **3 — Standard A-Level** (default, exam-typical)
-  2. **4 — Difficult A-Level** (harder Section B style)
-  3. **5 — Very Difficult A-Level** (top 10% of exam questions)
-  4. **6 — Extremely Difficult A-Level** (BPhO-style stretch, but strictly within the spec)
+  2. **4 — Difficult A-Level** — pick exactly one move from the conceptual-moves menu
+  3. **5 — Very Difficult A-Level** — combine two moves; at least one must be qualitative or evaluative
+  4. **6 — Extremely Difficult A-Level** — combine two or three moves; subtle traps, BPhO-stretch, strictly within the spec
+  At L4+, the prompt injects a menu of named conceptual moves the model picks from — synthesis across spec points, limiting-case reasoning, qualitative-before-quantitative, misconception traps, method evaluation, symbolic derivation before substitution, unfamiliar context with familiar physics, and estimation with justification. Hardness comes from depth of thinking, not from importing harder maths.
+- **Past-paper style anchor** — checkbox (default on). When on, one short past-paper question on the same topic is injected as a style reference (form only — the model is told to pick a fresh scenario). Turn off to generate purely from the spec content with no past-paper anchoring.
+- **Anti-repetition** — every generation gets a "do not repeat" list of the last 8 generated scenarios on the same topic, with a short kebab-case `scenario` tag (e.g. `skydiver-terminal-velocity`) stored on each question for cheap deduping.
 - **Topic picker** — collapsible search-and-tick of leaf topics. Pick up to N (= chosen question count) specific topics, or leave empty to auto-pick the weakest.
 - **Live build progress** — questions generated in parallel; the UI streams "3/7 — 4.2.1 Stationary waves" as each one finishes.
 - **Streaming grader** — feedback streams token-by-token via SSE.

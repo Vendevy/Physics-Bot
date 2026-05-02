@@ -527,6 +527,13 @@ body {
                         <option value="6">6 — Extremely Difficult A-Level</option>
                     </select>
                 </div>
+                <div class="opt-cell">
+                    <div class="opt-label">Past-paper style anchor</div>
+                    <label class="opt-row" style="cursor:pointer; user-select:none;">
+                        <input type="checkbox" id="input-use-past-paper-style" checked>
+                        <span class="opt-hint">Use a past-paper question on the same topic as a style reference (form only — model picks a fresh scenario). Off = generate purely from the spec.</span>
+                    </label>
+                </div>
             </div>
 
             <div class="topic-picker" id="topic-picker">
@@ -1078,7 +1085,8 @@ async function startSession() {
     document.getElementById('build-progress-count').textContent = `Preparing ${expectedCount} new questions...`;
     document.getElementById('build-progress-current').textContent = '';
     try {
-        const body = {n_new: nNew, difficulty: difficulty};
+        const usePastPaperStyle = document.getElementById('input-use-past-paper-style')?.checked ?? true;
+        const body = {n_new: nNew, difficulty: difficulty, use_past_paper_style: usePastPaperStyle};
         if (SUBJECT_ID) body.subject_id = parseInt(SUBJECT_ID, 10);
         if (topicIds.length) body.topic_ids = topicIds;
         const res = await fetch('/api/study/start', {

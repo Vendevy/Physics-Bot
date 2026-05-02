@@ -17,6 +17,7 @@ GEN_SCHEMA = {
         "text": {"type": "string", "description": "The question, in A-Level paper style. Include any required given values, and use Unicode/$...$ for math."},
         "marks": {"type": "integer", "description": "Total marks (typically 2-8)."},
         "markscheme": {"type": "string", "description": "Marking points with marks (M1/A1/B1 style) and acceptable alternatives."},
+        "scenario": {"type": "string", "description": "1-4 kebab-case words naming the physical scenario, e.g. 'skydiver-terminal-velocity', 'copper-tube-magnet-brake', 'loop-the-loop-min-speed'. Used to dedupe future generations."},
         "figure": {
             "type": ["object", "null"],
             "description": (
@@ -54,7 +55,7 @@ GEN_SCHEMA = {
             "required": ["type", "title", "xlabel", "ylabel", "x", "series"]
         }
     },
-    "required": ["text", "marks", "markscheme", "figure"],
+    "required": ["text", "marks", "markscheme", "figure", "scenario"],
 }
 
 DIFFICULTY_LABELS = {
@@ -71,21 +72,39 @@ DIFFICULTY_BLURBS = {
     ),
     4: (
         "Difficult A-Level — pitch this at the harder questions in an exam paper "
-        "(extended-response / Section B style): multi-step, requires synthesis "
-        "across the topic and adjacent ideas. Around the 70th-percentile of exam difficulty."
+        "(extended-response / Section B style), around the 70th-percentile of exam "
+        "difficulty. Pick EXACTLY ONE conceptual move from the menu below and build "
+        "the question around it; the question should have at least one stretching "
+        "part that goes beyond a textbook plug-and-chug calculation."
     ),
     5: (
-        "Very Difficult A-Level — top 10% of exam-paper questions: unfamiliar context, "
-        "multiple skills combined, requires careful reasoning and confident use of "
-        "the relevant equations. Many candidates would lose at least one mark."
+        "Very Difficult A-Level — top 10% of exam-paper questions. COMBINE TWO "
+        "conceptual moves from the menu below; at least one of the two MUST be "
+        "qualitative or evaluative (not just longer arithmetic). Unfamiliar context "
+        "is expected, but every required idea must already be in the spec."
     ),
     6: (
-        "Extremely Difficult A-Level — stretch beyond a typical exam paper, "
-        "BPhO-style or end-of-A-Level challenge questions. Long, multi-stage, "
-        "with subtle traps. STRICTLY within the published specification — "
-        "do NOT introduce off-syllabus topics, methods, or notation."
+        "Extremely Difficult A-Level — stretch beyond a typical exam paper "
+        "(BPhO / end-of-A-Level challenge level). COMBINE TWO OR THREE moves from "
+        "the menu below; subtle traps are welcome. At least one part must require "
+        "reasoning that cannot be reduced to plug-and-chug. STRICTLY within the "
+        "published specification — do NOT introduce off-syllabus topics, methods, "
+        "or notation. Hardness comes from depth of thinking, not from importing "
+        "harder maths."
     ),
 }
+
+CONCEPTUAL_MOVES = """Conceptual-difficulty menu (pick from these — DO NOT invent off-syllabus moves):
+- Synthesis: combine the given spec point with one adjacent spec point. Name the second concept explicitly in the question.
+- Limiting-case reasoning: ask what happens as a quantity → 0 or → ∞, or when an idealisation (frictionless, ideal gas, in vacuum, point mass, no air resistance) is dropped.
+- Qualitative-before-quantitative: the student must predict the DIRECTION of a change before any number is computed, then justify with an equation.
+- Misconception trap: build the question around a known A-Level confusion (weight vs mass under acceleration; EMF vs PD under load; intensity vs amplitude; drift velocity vs signal speed; node-spacing vs wavelength; centripetal force as a separate force).
+- Method evaluation: present a proposed experimental method or a student's reasoning and require the candidate to identify the flaw, a non-trivial source of uncertainty, or an improvement.
+- Symbolic derivation before substitution: the answer must be obtained as an algebraic expression in given symbols first, then evaluated only at the end.
+- Unfamiliar context, familiar physics: a non-textbook scenario (maglev brake, magnet falling through a copper tube, planet with non-Earth g, biomechanical lever, satellite refuelling) that maps cleanly onto one spec equation.
+- Estimation with justification: Fermi-style; the student must state and defend an order-of-magnitude assumption.
+
+Spec-bound: each chosen move must operate on the spec content given in the user message. Do NOT import equations, constants, identities, or notation that are not in the {board} {subject_name} specification. If a move would require off-syllabus tools to land, pick a different move."""
 
 
 def _gen_system(subject_name: str, board: str, difficulty: int = 3) -> str:
@@ -108,6 +127,10 @@ def _gen_system(subject_name: str, board: str, difficulty: int = 3) -> str:
     )
     spec_rules_block = "\n".join(f"- {r}" for r in spec_rules)
 
+    moves_block = ""
+    if diff >= 4:
+        moves_block = "\n\n" + CONCEPTUAL_MOVES.format(board=board, subject_name=subject_name)
+
     return f"""You are an examiner for {subject_name} ({board}) generating a fresh practice question on a specific topic from the official specification.
 
 CRITICAL — subject lock:
@@ -119,13 +142,18 @@ Specification rules:
 {spec_rules_block}
 
 Difficulty: {diff_blurb}
-- The difficulty level above is the PRIMARY anchor for hardness. Use the student's per-topic mastery score (0=novice, 1=mastered) only for fine-tuning whether the question is more lead-in vs. more stretching within the chosen difficulty band.
+- The difficulty level above is the PRIMARY anchor for hardness. Use the student's per-topic mastery score (0=novice, 1=mastered) only for fine-tuning whether the question is more lead-in vs. more stretching within the chosen difficulty band.{moves_block}
 
 Question rules:
 - Match the style and structure of official {board} questions.
+- If the question carries more than 4 marks, structure it as multi-part ((a), (b), (b)(i), (b)(ii), etc.) matching how {board} papers structure long questions, rather than one giant prose stem.
+- Avoid reusing the canonical textbook scenario for this topic when a different real-world setup makes the same point.
 - Include any data/values needed to solve it (don't write open-ended definition prompts).
 - The markscheme must enumerate marking points with how each mark is awarded.
 - Total marks should reflect the depth of the question.
+
+Scenario tag:
+- The `scenario` field is a 1-4 kebab-case-word label naming the physical setup (e.g. "skydiver-terminal-velocity", "copper-tube-magnet-brake", "planet-with-different-g"). Make it specific enough that two questions on the same topic with different scenarios get different tags.
 
 Figures:
 - Set `figure` to null for almost every question.
@@ -220,19 +248,101 @@ def pick_due_for_recall(subject_id: int, n: int) -> list[dict]:
         return results
 
 
-def generate_question(topic: dict, *, subject_name: str, board: str, difficulty: int = 3) -> dict:
-    """Generate one fresh question for a topic. Returns dict with text, marks, markscheme."""
+def _recent_for_topic(topic_id: int, n: int = 8) -> list[dict]:
+    """Most recent generated questions on this topic — scenario tag + first 120 chars of text."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT q.scenario, substr(q.text, 1, 120) AS snippet
+            FROM questions q
+            JOIN question_topics qt ON qt.question_id = q.id
+            WHERE qt.topic_id = ? AND q.source = 'generated'
+            ORDER BY q.id DESC LIMIT ?
+            """,
+            (topic_id, n),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _style_exemplar_for_topic(topic_id: int) -> str | None:
+    """One random past-paper question text snippet on this topic, for style anchoring."""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT substr(q.text, 1, 200) AS snippet
+            FROM questions q
+            JOIN question_topics qt ON qt.question_id = q.id
+            WHERE qt.topic_id = ? AND q.source = 'past_paper'
+            ORDER BY RANDOM() LIMIT 1
+            """,
+            (topic_id,),
+        ).fetchone()
+        return row["snippet"] if row else None
+
+
+def generate_question(
+    topic: dict,
+    *,
+    subject_name: str,
+    board: str,
+    difficulty: int = 3,
+    use_past_paper_style: bool = True,
+) -> dict:
+    """Generate one fresh question for a topic. Returns dict with text, marks, markscheme.
+
+    `use_past_paper_style`: when True (default), inject one short past-paper snippet on
+    the same topic as a style anchor (form-only). When False, generate purely from the
+    spec content + do-not-repeat list, no past-paper anchoring.
+    """
     score = topic.get("score", 0.0) or 0.0
     diff_label = DIFFICULTY_LABELS.get(difficulty, DIFFICULTY_LABELS[3])
-    user_text = (
-        f"Subject: {subject_name} ({board})\n"
-        f"Topic: {topic['code']} — {topic['title']}\n"
-        f"Spec content: {topic['content']}\n"
-        f"Student's current mastery on this topic: {score:.2f}\n"
-        f"Required difficulty level: {diff_label} (level {difficulty}).\n\n"
-        f"Generate one {subject_name} practice question on this topic at the required difficulty level. "
-        f"Remember: the question must be a {subject_name} question, never from another subject."
+
+    parts = [
+        f"Subject: {subject_name} ({board})",
+        f"Topic: {topic['code']} — {topic['title']}",
+        f"Spec content: {topic['content']}",
+        f"Student's current mastery on this topic: {score:.2f}",
+        f"Required difficulty level: {diff_label} (level {difficulty}).",
+    ]
+
+    recent = _recent_for_topic(topic["id"]) if topic.get("id") is not None else []
+    if recent:
+        bullets = []
+        for r in recent:
+            tag = r.get("scenario")
+            snippet = (r.get("snippet") or "").replace("\n", " ").strip()
+            if tag:
+                bullets.append(f"- [{tag}] {snippet}")
+            else:
+                bullets.append(f"- {snippet}")
+        parts.append(
+            "Do NOT repeat any of these recent scenarios on this topic — pick a "
+            "different physical setup, different numerical regime, and different "
+            "question stem (calculate / explain / derive / evaluate / design):\n"
+            + "\n".join(bullets)
+        )
+
+    exemplar = (
+        _style_exemplar_for_topic(topic["id"])
+        if use_past_paper_style and topic.get("id") is not None
+        else None
     )
+    if exemplar:
+        exemplar_clean = exemplar.replace("\n", " ").strip()
+        parts.append(
+            "Style reference (form only — the student has already done this exact "
+            "past-paper question, so match its register and mark-density but pick "
+            "a FRESH scenario; do NOT reuse the numbers, objects, or sub-parts):\n"
+            f"  {exemplar_clean}"
+        )
+
+    parts.append(
+        f"Generate one {subject_name} practice question on this topic at the required "
+        f"difficulty level. Remember: the question must be a {subject_name} question, "
+        f"never from another subject."
+    )
+    user_text = "\n\n".join(parts)
+
     return llm.call_json(
         system=_gen_system(subject_name, board, difficulty),
         user_blocks=[llm.text_block(user_text)],
@@ -248,6 +358,7 @@ def build_session(
     topic_ids: list[int] | None = None,
     n_new: int | None = None,
     difficulty: int = 3,
+    use_past_paper_style: bool = True,
     progress_cb: Callable[[int, int, str], None] | None = None,
     max_workers: int = 4,
 ) -> int:
@@ -291,7 +402,14 @@ def build_session(
     generated_map: dict[int, tuple[dict, dict]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
-            ex.submit(generate_question, t, subject_name=subject_name, board=board, difficulty=difficulty): (i, t)
+            ex.submit(
+                generate_question,
+                t,
+                subject_name=subject_name,
+                board=board,
+                difficulty=difficulty,
+                use_past_paper_style=use_past_paper_style,
+            ): (i, t)
             for i, t in enumerate(weak)
         }
         done = 0
@@ -318,9 +436,9 @@ def build_session(
             fig_val = q.get("figure")
             fig_json = json.dumps(fig_val) if fig_val else None
             cur = conn.execute(
-                "INSERT INTO questions(subject_id, source, text, marks, markscheme, figure) "
-                "VALUES(?, 'generated', ?, ?, ?, ?) RETURNING id",
-                (subject_id, q["text"], q["marks"], q["markscheme"], fig_json),
+                "INSERT INTO questions(subject_id, source, text, marks, markscheme, figure, scenario) "
+                "VALUES(?, 'generated', ?, ?, ?, ?, ?) RETURNING id",
+                (subject_id, q["text"], q["marks"], q["markscheme"], fig_json, q.get("scenario")),
             )
             qid = cur.fetchone()["id"]
             conn.execute(

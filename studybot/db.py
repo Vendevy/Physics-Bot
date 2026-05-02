@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS questions (
     marks INTEGER NOT NULL,
     markscheme TEXT,
     figure TEXT,                     -- optional Chart.js JSON for generated questions
+    scenario TEXT,                   -- short kebab-case tag describing the physical scenario (generated questions)
     flagged INTEGER NOT NULL DEFAULT 0,
     flag_reason TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -137,6 +138,8 @@ def migrate() -> None:
             conn.execute("ALTER TABLE questions ADD COLUMN flag_reason TEXT")
         if "figure" not in q_cols:
             conn.execute("ALTER TABLE questions ADD COLUMN figure TEXT")
+        if "scenario" not in q_cols:
+            conn.execute("ALTER TABLE questions ADD COLUMN scenario TEXT")
         a_cols = {r["name"] for r in conn.execute("PRAGMA table_info(attempts)").fetchall()}
         if "time_spent_seconds" not in a_cols:
             conn.execute("ALTER TABLE attempts ADD COLUMN time_spent_seconds INTEGER")
