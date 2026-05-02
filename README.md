@@ -96,6 +96,7 @@ Two modes selectable on the start screen:
 - **Charts (Chart.js)** — when a question genuinely needs a graph (e.g. v–t analysis, IV characteristics, decay curve), the model emits structured data and the chart is rendered inline beside the question.
 - **Autosave** — every keystroke is saved to `localStorage`.
 - **Resume / discard** — close the tab and a banner offers Resume or Discard.
+- **Skip** — skip any question without grading (no API cost). Recorded as 0 marks. Keyboard shortcut: Escape.
 - **Flag** — per-question button to mark broken / OCR-mangled / disputed questions.
 - **Time tracking** — wall-clock per question is logged on every attempt.
 - **Review & Consolidate** — at the end, walk back through every question with the markscheme, your answer, and the feedback. You must type a consolidation note before advancing — notes are persisted per-question.
@@ -109,7 +110,7 @@ Two modes selectable on the start screen:
 #### Other UX
 - **Subject lock** — generated questions are explicitly framed in the active subject; even subject-agnostic topic titles ("Evaluation of experimental method", "Significant figures") get physics scenarios in physics sessions.
 - **Calculus rule** (physics only) — the OCR H556 spec doesn't include calculus, so the prompt forbids dx/dt notation, integrals, and differential equations in both the question and the markscheme. Maths sessions are unaffected.
-- **Keyboard shortcuts** — Ctrl+Enter submits, →/← navigate the review modal, Esc closes it.
+- **Keyboard shortcuts** — Ctrl+Enter submits, Escape skips, →/← navigate the review modal, Esc closes it.
 - **KaTeX** — LaTeX in question/markscheme/feedback (`$...$` and `$$...$$`) renders inline.
 
 ### Notebook (`/notebook`)
@@ -121,14 +122,36 @@ Surfaces every consolidation note you've written, grouped by topic, newest first
 |---|---|---|
 | Spec / past-paper extraction | Gemini 2.5 Flash (or Claude Haiku) | Native PDF parsing, very cheap |
 | Generating new questions | Claude Sonnet 4.6 | Best at mimicking exam style and calibrating difficulty |
+| Validating generated questions | Claude Haiku 4.5 | Checks solvability, consistency, markscheme accuracy — cheaper than Sonnet |
 | Grading answers | Claude Sonnet 4.6 | Reliable partial credit + actionable feedback |
 | Dashboard / progress / notebook | No LLM | SQLite queries + HTML |
 
-- **SM-2** spaced repetition per topic (ease, interval, repetitions). Mastery score is a 0–1 EMA of recent grades, used to pick "weakest" topics.
-- **Daily set** — by default `DAILY_NEW=7` generated questions on the weakest topics + `DAILY_RECALL=3` past-paper questions due for spaced recall (override the constants in `studybot/config.py`, or change per-session via the start-screen stepper).
+### Question generation pipeline
+
+1. **Generate** — Sonnet produces a question + markscheme on the weakest topic.
+2. **Validate** — Haiku checks the question for solvability, self-consistency, markscheme accuracy, and LaTeX formatting. If it fails, the question is regenerated (up to 2 retries). If Haiku provides a corrected markscheme, the correction is applied.
+3. **Calibrated grading** — When the student submits, the grader produces:
+   - `MARKS_AWARDED` / `TOTAL_MARKS` — the raw mark
+   - `SM2_GRADE` — calibrated from the marks ratio (0–100% maps to 0–5), then adjustable ±1 by the LLM for qualitative factors
+   - `ERROR_TAGS` — categorised error types (calculation, units, sig_figs, misconception, missing_explanation, wrong_method, incomplete, notation)
+   - `FEEDBACK` — structured by question part with ✅/❌ per marking point
+4. **Alternative approaches** — The grader explicitly awards marks for valid alternative physics approaches, even if they aren't in the markscheme.
+
+### Spaced repetition
+
+- **SM-2** per topic (ease, interval, repetitions). Mastery score is a 0–1 EMA (alpha=0.2) of recent grades, used to pick "weakest" topics.
+- **Error-pattern boosting** — topics with recent repeated low grades (sm2_grade ≤ 2 in the last 14 days) get an error boost of up to 0.3, pushing them higher in the weakest-topics ranking so you study what you keep getting wrong.
+- **Daily set** — by default `DAILY_NEW=7` generated questions on the weakest topics + `DAILY_RECALL=3` past-paper questions due for spaced recall. Recall questions are ordered by: fewest times seen, then lowest last grade, then most overdue.
 - **Mock-paper set** — every question from a chosen past paper, in original order. Batch-graded at the end.
 - **Files API caching** — uploaded PDFs are tracked in `files_cache` so you don't re-upload between runs.
 - **Prompt caching** — the grader splits the question + markscheme (cached) from the student answer (uncached), so re-grades on the same question hit cache.
+
+### LaTeX in markschemes
+
+All mathematical expressions in markschemes and feedback use LaTeX notation (`$...$` for inline math, e.g. `$E_k = \frac{1}{2}mv^2$`). This applies to:
+- Generated question markschemes
+- Extracted past-paper markschemes
+- Grader feedback (structured by question part)
 
 ## Cost estimate (Physics, 27 papers, OCR H556)
 
@@ -136,7 +159,16 @@ Surfaces every consolidation note you've written, grouped by topic, newest first
 |---|---|---|
 | Extract spec | ~$0.50 | ~$0.50 |
 | Build question bank (27 papers) | ~$54–108 | ~$0.50–1.50 |
-| Daily session | ~$0.50–1 | ~$0.50–1 |
+| Daily session (7 gen + 3 recall) | ~$0.20–0.35 | ~$0.20–0.35 |
 | **One-off setup** | **~$55–110** | **~$1.50–3** |
+
+Per-question cost breakdown (daily session):
+
+| Call | Model | Cost |
+|---|---|---|
+| Generate question | Sonnet 4.6 | ~$0.01 |
+| Validate question | Haiku 4.5 | ~$0.002 |
+| Grade answer | Sonnet 4.6 | ~$0.01 |
+| **Total per question** | | **~$0.02–0.03** |
 
 Hybrid is ~50× cheaper for the one-time extraction; identical DB quality.

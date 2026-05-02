@@ -42,7 +42,19 @@ def _clean_schema_for_gemini(schema: dict) -> dict:
         for k, v in schema.items():
             if k == "additionalProperties":
                 continue
-            cleaned[k] = _clean_schema_for_gemini(v)
+            # Convert lowercase types to uppercase for Gemini
+            if k == "type" and isinstance(v, str):
+                cleaned[k] = v.upper()
+            # Handle ["string", "null"] -> "STRING" + nullable: true
+            elif k == "type" and isinstance(v, list):
+                non_null = [t for t in v if t != "null"]
+                if len(non_null) == 1:
+                    cleaned[k] = non_null[0].upper()
+                    cleaned["nullable"] = True
+                else:
+                    cleaned[k] = non_null[0].upper()
+            else:
+                cleaned[k] = _clean_schema_for_gemini(v)
         return cleaned
     elif isinstance(schema, list):
         return [_clean_schema_for_gemini(item) for item in schema]

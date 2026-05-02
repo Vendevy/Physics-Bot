@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from . import llm
-from .config import DAILY_NEW, DAILY_RECALL
+from .config import DAILY_NEW, DAILY_RECALL, VALIDATE_MODEL
 from .db import connect
 from .srs import today_iso
 
@@ -16,7 +16,7 @@ GEN_SCHEMA = {
     "properties": {
         "text": {"type": "string", "description": "The question, in A-Level paper style. Include any required given values, and use Unicode/$...$ for math."},
         "marks": {"type": "integer", "description": "Total marks (typically 2-8)."},
-        "markscheme": {"type": "string", "description": "Marking points with marks (M1/A1/B1 style) and acceptable alternatives."},
+        "markscheme": {"type": "string", "description": "Marking points with marks (M1/A1/B1 style) and acceptable alternatives. All mathematical expressions, equations, symbols, and variables must be in LaTeX using $...$ for inline math. Examples: $F=ma$, $\\Delta E = mc^2$, $v = u + at$, $3.2 \\times 10^{-19}\\,\\mathrm{C}$. For multi-part questions, the markscheme MUST be structured with the question part (including its text) above the marks for that part, so the reader can see which question each marking point belongs to. Example format:\n\n(a) Calculate the maximum speed of the cart. [2]\nM1: use of $E_k = \\frac{1}{2}mv^2$\nA1: $v = 4.7\\,\\mathrm{m\\,s^{-1}}$\n\n(b)(i) Explain why the speed decreases. [3]\nB1: reference to work done against friction\nB1: $E_k$ is converted to thermal energy\nB1: net force decelerates the cart\n\nDo NOT write the markscheme as a single undifferentiated block."},
         "scenario": {"type": "string", "description": "1-4 kebab-case words naming the physical scenario, e.g. 'skydiver-terminal-velocity', 'copper-tube-magnet-brake', 'loop-the-loop-min-speed'. Used to dedupe future generations."},
         "figure": {
             "type": ["object", "null"],
@@ -57,6 +57,29 @@ GEN_SCHEMA = {
     },
     "required": ["text", "marks", "markscheme", "figure", "scenario"],
 }
+
+VALIDATE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "pass": {"type": "boolean", "description": "Whether the question is correct, solvable, and self-consistent"},
+        "issues": {"type": "string", "description": "Comma-separated list of issues found, or 'none' if passing"},
+        "corrected_markscheme": {"type": ["string", "null"], "description": "Corrected markscheme if there were issues, null if passing or no correction needed"},
+    },
+    "required": ["pass", "issues", "corrected_markscheme"],
+}
+
+VALIDATE_SYSTEM = """You are an A-Level examiner verifying a practice question for correctness before it is given to a student.
+
+Check the following:
+1. SOLVABILITY — Can the question be answered using ONLY the information given and knowledge from the specification? No missing values, no unstated assumptions.
+2. CONSISTENCY — Are all given values self-consistent? (e.g. if V=12 V and R=4 Ω are both given, I must equal 3 A by Ohm's law; if they conflict, flag it.)
+3. MARKSCHEME ACCURACY — Does the markscheme correctly solve the question as stated? Do the marking points (M1, A1, B1) add up to the total marks? Does the final answer match the given values?
+4. COMPLETENESS — Are all sub-parts of the question addressed in the markscheme?
+5. FIGURES — If a figure is provided, does the question text reference it and are the data realistic?
+6. LATEX FORMATTING — Are all mathematical expressions, equations, and symbols in the markscheme wrapped in $...$ LaTeX? There should be no bare Unicode math symbols (like ², ⁻¹, ×, →) outside of LaTeX delimiters.
+
+Be lenient — only flag genuine errors that would prevent a student from answering correctly or make the markscheme wrong. Minor phrasing issues or alternative valid wordings are acceptable."""
 
 DIFFICULTY_LABELS = {
     3: "Standard A-Level",
@@ -125,6 +148,12 @@ def _gen_system(subject_name: str, board: str, difficulty: int = 3) -> str:
         f"Stay strictly within the {board} {subject_name} specification. Do not "
         "introduce off-syllabus topics, equations, or notation."
     )
+    spec_rules.append(
+        "All mathematical expressions in the markscheme must use LaTeX: $...$ for "
+        "inline math. For example: $E_k = \\frac{1}{2}mv^2$, $v = u + at$, "
+        "$3.2 \\times 10^{-19}\\,\\mathrm{C}$. Never use Unicode approximations "
+        "like ² or ⁻¹ in the markscheme — always use proper LaTeX."
+    )
     spec_rules_block = "\n".join(f"- {r}" for r in spec_rules)
 
     moves_block = ""
@@ -150,6 +179,7 @@ Question rules:
 - Avoid reusing the canonical textbook scenario for this topic when a different real-world setup makes the same point.
 - Include any data/values needed to solve it (don't write open-ended definition prompts).
 - The markscheme must enumerate marking points with how each mark is awarded.
+- For multi-part questions, the markscheme MUST repeat each question part (including its text) above the marking points for that part, so the reader can see which question each mark refers to. Do NOT write the markscheme as a single undifferentiated block.
 - Total marks should reflect the depth of the question.
 
 Scenario tag:
@@ -163,16 +193,31 @@ Figures:
 """
 
 
+MAX_VALIDATE_RETRIES = 2
+
+
 def pick_weakest_topics(subject_id: int, n: int) -> list[dict]:
-    """n leaf topics with content, ordered by lowest mastery score, breaking ties by oldest review."""
+    """n leaf topics with content, ordered by lowest (mastery - error_boost),
+    so topics with recent repeated errors are prioritised over their mastery alone."""
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT t.id, t.code, t.title, t.content, m.score, m.last_reviewed
+            SELECT t.id, t.code, t.title, t.content, m.score, m.last_reviewed,
+                   COALESCE(ep.error_boost, 0.0) AS error_boost
             FROM topics t
             JOIN mastery m ON m.topic_id = t.id
+            LEFT JOIN (
+                SELECT qt.topic_id,
+                       MIN(0.3, COUNT(*) * 0.1) AS error_boost
+                FROM attempts a
+                JOIN question_topics qt ON qt.question_id = a.question_id
+                WHERE a.answered_at >= date('now', '-14 days')
+                  AND a.sm2_grade <= 2
+                GROUP BY qt.topic_id
+            ) ep ON ep.topic_id = t.id
             WHERE t.subject_id = ? AND COALESCE(t.content, '') != ''
-            ORDER BY m.score ASC, COALESCE(m.last_reviewed, '0') ASC, t.id ASC
+            ORDER BY (m.score - COALESCE(ep.error_boost, 0.0)) ASC,
+                     COALESCE(m.last_reviewed, '0') ASC, t.id ASC
             LIMIT ?
             """,
             (subject_id, n),
@@ -204,15 +249,19 @@ def pick_topics_by_id(subject_id: int, topic_ids: list[int]) -> list[dict]:
 
 
 def pick_due_for_recall(subject_id: int, n: int) -> list[dict]:
-    """Past-paper questions whose primary topic is due for review (next_review <= today),
-    preferring topics with the longest overdue gap. Falls back to lowest-mastery if nothing is due yet."""
+    """Past-paper questions whose primary topic is due for review (next_review <= today).
+    Prefers questions seen fewer times and with lower last-attempt scores to avoid
+    re-serving questions the student has already mastered."""
     today = today_iso()
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT q.id AS question_id, q.text, q.marks, q.markscheme, q.qnum,
                    t.id AS topic_id, t.code, t.title,
-                   m.next_review, m.score
+                   m.next_review, m.score,
+                   (SELECT COUNT(*) FROM session_questions sq WHERE sq.question_id = q.id) AS times_seen,
+                   (SELECT a.sm2_grade FROM attempts a
+                    WHERE a.question_id = q.id ORDER BY a.id DESC LIMIT 1) AS last_grade
             FROM questions q
             JOIN question_topics qt ON qt.question_id = q.id
             JOIN topics t ON t.id = qt.topic_id
@@ -220,29 +269,34 @@ def pick_due_for_recall(subject_id: int, n: int) -> list[dict]:
             WHERE q.subject_id = ? AND q.source = 'past_paper'
               AND m.next_review IS NOT NULL AND m.next_review <= ?
             GROUP BY q.id
-            ORDER BY m.next_review ASC
+            ORDER BY times_seen ASC, COALESCE(last_grade, 0) ASC, m.next_review ASC
             LIMIT ?
             """,
             (subject_id, today, n),
         ).fetchall()
         results = [dict(r) for r in rows]
         if len(results) < n:
-            # Fallback: weakest topics with available past-paper questions
+            existing_ids = [r["question_id"] for r in results]
+            placeholders = ",".join("?" * len(existing_ids)) if existing_ids else "NULL"
+            extra_params = (subject_id, *existing_ids, n - len(results))
             extra = conn.execute(
-                """
+                f"""
                 SELECT q.id AS question_id, q.text, q.marks, q.markscheme, q.qnum,
                        t.id AS topic_id, t.code, t.title,
-                       m.next_review, m.score
+                       m.next_review, m.score,
+                       (SELECT COUNT(*) FROM session_questions sq WHERE sq.question_id = q.id) AS times_seen,
+                       (SELECT a.sm2_grade FROM attempts a
+                        WHERE a.question_id = q.id ORDER BY a.id DESC LIMIT 1) AS last_grade
                 FROM questions q
                 JOIN question_topics qt ON qt.question_id = q.id
                 JOIN topics t ON t.id = qt.topic_id
                 JOIN mastery m ON m.topic_id = t.id
                 WHERE q.subject_id = ? AND q.source = 'past_paper'
-                  AND q.id NOT IN ({})
-                ORDER BY m.score ASC, RANDOM()
+                  AND q.id NOT IN ({placeholders})
+                ORDER BY m.score ASC, times_seen ASC, RANDOM()
                 LIMIT ?
-                """.format(",".join("?" * len(results)) or "NULL"),
-                (subject_id, *[r["question_id"] for r in results], n - len(results)),
+                """,
+                extra_params,
             ).fetchall()
             results.extend(dict(r) for r in extra)
         return results
@@ -278,6 +332,33 @@ def _style_exemplar_for_topic(topic_id: int) -> str | None:
             (topic_id,),
         ).fetchone()
         return row["snippet"] if row else None
+
+
+def _validate_question(q: dict, subject_name: str, board: str, topic_content: str) -> dict:
+    """Validate a generated question for solvability, consistency, and markscheme accuracy.
+    Returns dict with keys: 'pass' (bool), 'issues' (str), 'corrected' (str|None)."""
+    parts = [
+        f"Subject: {subject_name} ({board})",
+        f"Topic spec: {topic_content}",
+        f"Question ({q.get('marks', '?')} marks):\n{q.get('text', '')}",
+        f"Markscheme:\n{q.get('markscheme', '')}",
+    ]
+    if q.get("figure"):
+        parts.append(f"Figure data: {json.dumps(q['figure'])}")
+
+    result = llm.call_json(
+        system=VALIDATE_SYSTEM,
+        user_blocks=[llm.text_block("\n\n".join(parts))],
+        schema=VALIDATE_SCHEMA,
+        cache_system=False,
+        model=VALIDATE_MODEL,
+        max_tokens=1000,
+    )
+    return {
+        "pass": bool(result.get("pass", False)),
+        "issues": result.get("issues", ""),
+        "corrected": result.get("corrected_markscheme"),
+    }
 
 
 def generate_question(
@@ -359,6 +440,7 @@ def build_session(
     n_new: int | None = None,
     difficulty: int = 3,
     use_past_paper_style: bool = True,
+    validate: bool = True,
     progress_cb: Callable[[int, int, str], None] | None = None,
     max_workers: int = 4,
 ) -> int:
@@ -370,6 +452,9 @@ def build_session(
 
     `n_new` overrides DAILY_NEW for this session; clamped to [1, 15].
     `difficulty` is 3..6 (Standard, Difficult, Very Difficult, Extremely Difficult).
+    `validate` — when True, each generated question is checked by a validation call;
+    if it fails, the question is regenerated (up to MAX_VALIDATE_RETRIES times).
+    If the validation provides a corrected markscheme, the correction is applied.
 
     `progress_cb(done, total, label)` is called as each question finishes generating,
     so callers (e.g. the web UI) can stream status to the user.
@@ -397,19 +482,42 @@ def build_session(
             "No topics found. Run `python -m studybot extract <subject>` first."
         )
 
+    def _generate_one(topic: dict) -> dict:
+        q = generate_question(
+            topic,
+            subject_name=subject_name,
+            board=board,
+            difficulty=difficulty,
+            use_past_paper_style=use_past_paper_style,
+        )
+        if not validate:
+            return q
+        for attempt in range(MAX_VALIDATE_RETRIES + 1):
+            v = _validate_question(q, subject_name, board, topic.get("content", ""))
+            if v["pass"]:
+                return q
+            if v["corrected"]:
+                q["markscheme"] = v["corrected"]
+                return q
+            if attempt < MAX_VALIDATE_RETRIES:
+                print(f"    Validation failed (attempt {attempt + 1}): {v['issues']}")
+                q = generate_question(
+                    topic,
+                    subject_name=subject_name,
+                    board=board,
+                    difficulty=difficulty,
+                    use_past_paper_style=use_past_paper_style,
+                )
+            else:
+                print(f"    Using unvalidated question after {MAX_VALIDATE_RETRIES + 1} attempts")
+        return q
+
     print(f"Generating {len(weak)} new questions on weakest topics...")
     total = len(weak)
     generated_map: dict[int, tuple[dict, dict]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
-            ex.submit(
-                generate_question,
-                t,
-                subject_name=subject_name,
-                board=board,
-                difficulty=difficulty,
-                use_past_paper_style=use_past_paper_style,
-            ): (i, t)
+            ex.submit(_generate_one, t): (i, t)
             for i, t in enumerate(weak)
         }
         done = 0

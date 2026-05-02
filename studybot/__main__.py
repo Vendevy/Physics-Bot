@@ -218,7 +218,20 @@ def cmd_study(args):
             lines.append(line)
         answer = "\n".join(lines).strip()
         if not answer:
-            print("(skipped)\n")
+            print("(skipped — 0 marks)\n")
+            record_attempt(
+                question_id=it["qid"],
+                session_id=session_id,
+                position=it["position"],
+                user_answer="[skipped]",
+                grade_result={
+                    "marks_awarded": 0,
+                    "total_marks": it["marks"],
+                    "sm2_grade": 0,
+                    "feedback": "Skipped without answering.",
+                    "error_tags": [],
+                },
+            )
             continue
 
         print("\nGrading...")

@@ -143,6 +143,8 @@ def migrate() -> None:
         a_cols = {r["name"] for r in conn.execute("PRAGMA table_info(attempts)").fetchall()}
         if "time_spent_seconds" not in a_cols:
             conn.execute("ALTER TABLE attempts ADD COLUMN time_spent_seconds INTEGER")
+        if "error_tags" not in a_cols:
+            conn.execute("ALTER TABLE attempts ADD COLUMN error_tags TEXT")
         s_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         if "mode" not in s_cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'daily'")

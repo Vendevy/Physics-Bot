@@ -968,6 +968,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_study_submit()
         elif path == "/api/study/submit-stream":
             self._handle_study_submit_stream()
+        elif path == "/api/study/skip":
+            self._handle_study_skip()
         elif path == "/api/study/consolidate":
             self._handle_study_consolidate()
         elif path == "/api/study/flag":
@@ -1204,7 +1206,48 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "total_marks": result["total_marks"],
                 "sm2_grade": result["sm2_grade"],
                 "feedback": result["feedback"],
+                "error_tags": result.get("error_tags", []),
             })
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_study_skip(self):
+        """Skip a question without grading — no API call, just record a minimal attempt."""
+        try:
+            data = self._read_json()
+            session_id = data.get("session_id")
+            position = data.get("position")
+            time_spent = _parse_time_spent(data.get("time_spent_seconds"))
+            if session_id is None or position is None:
+                self._send_json({"ok": False, "error": "Missing session_id or position"})
+                return
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT question_id FROM session_questions WHERE session_id = ? AND position = ?",
+                    (session_id, position),
+                ).fetchone()
+                if not row:
+                    self._send_json({"ok": False, "error": "Question not found in session"})
+                    return
+                question_id = row["question_id"]
+                q = conn.execute(
+                    "SELECT marks FROM questions WHERE id = ?", (question_id,)
+                ).fetchone()
+                total_marks = q["marks"] if q else 0
+                cur = conn.execute(
+                    "INSERT INTO attempts(question_id, user_answer, marks_awarded, total_marks, sm2_grade, feedback, time_spent_seconds, error_tags) "
+                    "VALUES(?,'[skipped]',0,?,0,'Skipped without answering.',?,'') "
+                    "RETURNING id",
+                    (question_id, total_marks, time_spent),
+                )
+                attempt_id = cur.fetchone()["id"]
+                conn.execute(
+                    "UPDATE session_questions SET attempt_id = ? "
+                    "WHERE session_id = ? AND position = ?",
+                    (attempt_id, session_id, position),
+                )
+                conn.commit()
+            self._send_json({"ok": True, "skipped": True, "marks_awarded": 0, "total_marks": total_marks})
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
 

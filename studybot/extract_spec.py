@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import llm
+from . import gemini
 from .db import connect, upsert_subject
 
 TOPIC_SCHEMA = {
@@ -40,6 +40,7 @@ Rules:
 - For leaf learning objectives, copy the objective text into `content`. For parent nodes, leave `content` empty.
 - Be exhaustive: include every leaf learning objective. Do not skip practical / mathematical / data-handling sections.
 - Do not invent codes. If the spec uses unnumbered headings, fabricate a stable kebab-case code (e.g. "practical-skills/uncertainties").
+- Be concise: shorten content to key phrases only, not full sentences. Example: "Derive SUVAT equations" not "Students should be able to derive the equations of motion for constant acceleration".
 """
 
 
@@ -48,29 +49,55 @@ def extract(subject_name: str, board: str, spec_pdf: Path) -> int:
     if not spec_pdf.exists():
         raise FileNotFoundError(spec_pdf)
 
-    print(f"Uploading spec: {spec_pdf.name}")
-    file_id = llm.upload_pdf(spec_pdf)
-
-    print("Asking Claude to extract topic tree (this may take a minute)...")
-    result = llm.call_json(
+    print(f"Using Gemini to extract topic tree from: {spec_pdf.name}")
+    
+    # Pass 1: Extract top-level structure only
+    print("  Pass 1: Extracting top-level modules...")
+    result = gemini.call_json(
         system=SYSTEM,
-        user_blocks=[
-            llm.doc_block(file_id, cache=True),
-            llm.text_block(
-                "Extract the full topic tree from this specification. "
-                "Return every learning objective as a leaf node."
-            ),
-        ],
+        user_text=(
+            "Extract ONLY the top-level modules (depth 0) from this specification. "
+            "Return their codes and titles only, no sub-topics. "
+            "Set parent_code to null for all of them."
+        ),
+        files=[spec_pdf],
         schema=TOPIC_SCHEMA,
-        max_tokens=32000,
+        max_tokens=65536,
     )
-
-    topics = result["topics"]
-    print(f"Extracted {len(topics)} topics. Inserting into db...")
+    
+    all_topics = result["topics"]
+    top_level_codes = [t["code"] for t in all_topics if t["depth"] == 0]
+    print(f"  Found {len(top_level_codes)} top-level modules.")
+    
+    # Pass 2: Extract sub-topics for each module
+    for module_code in top_level_codes:
+        print(f"  Pass 2: Extracting sub-topics for {module_code}...")
+        result = gemini.call_json(
+            system=SYSTEM,
+            user_text=(
+                f"Extract the full topic tree for module {module_code} ONLY from this specification. "
+                "Return all learning objectives as leaf nodes. "
+                "Keep content fields SHORT - just key phrases, not full sentences."
+            ),
+            files=[spec_pdf],
+            schema=TOPIC_SCHEMA,
+            max_tokens=65536,
+        )
+        all_topics.extend(result["topics"])
+    
+    # Deduplicate by code, keeping first occurrence
+    seen_codes = set()
+    topics = []
+    for t in all_topics:
+        if t["code"] not in seen_codes:
+            seen_codes.add(t["code"])
+            topics.append(t)
+    
+    print(f"Extracted {len(topics)} unique topics. Inserting into db...")
 
     with connect() as conn:
         subject_id = upsert_subject(conn, subject_name, board, str(spec_pdf))
-        conn.execute("UPDATE subjects SET spec_file_id = ? WHERE id = ?", (file_id, subject_id))
+        conn.execute("UPDATE subjects SET spec_file_id = ? WHERE id = ?", ("gemini-extracted", subject_id))
         # Clear existing topics for this subject to allow re-extraction
         conn.execute("DELETE FROM topics WHERE subject_id = ?", (subject_id,))
 

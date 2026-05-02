@@ -160,6 +160,50 @@ body {
 .result-feedback p { margin-bottom:10px; }
 .result-feedback p:last-child { margin-bottom:0; }
 .result-feedback.streaming { border-left:2px solid #6366f1; padding-left:12px; }
+.question-nav {
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:16px; gap:12px;
+}
+.question-dots {
+    display:flex; gap:6px; justify-content:center; flex:1; flex-wrap:wrap;
+}
+.question-dot {
+    width:12px; height:12px; border-radius:50%;
+    background:#27272a; cursor:pointer; border:2px solid transparent;
+    transition:background 0.2s, border-color 0.2s, transform 0.15s;
+}
+.question-dot:hover { border-color:#52525b; transform:scale(1.2); }
+.question-dot.current { border-color:#6366f1; background:#6366f1; transform:scale(1.2); }
+.question-dot.answered { background:#22c55e; }
+.question-dot.skipped { background:#71717a; }
+.nav-btn { min-width:80px; }
+.completed-banner {
+    display:flex; align-items:center; gap:8px;
+    padding:10px 14px; border-radius:8px;
+    margin-bottom:16px; font-size:14px; font-weight:500;
+}
+.completed-banner.answered {
+    background:rgba(34,197,94,0.1); color:#4ade80;
+    border:1px solid rgba(34,197,94,0.2);
+}
+.completed-banner.skipped {
+    background:rgba(113,113,122,0.1); color:#a1a1aa;
+    border:1px solid rgba(113,113,122,0.2);
+}
+.inline-result {
+    background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06);
+    border-radius:10px; padding:14px 16px; margin-bottom:16px;
+}
+.inline-result-score {
+    font-size:18px; font-weight:600; margin-bottom:4px;
+}
+.inline-result-score.correct { color:#22c55e; }
+.inline-result-score.partial { color:#eab308; }
+.inline-result-score.incorrect { color:#ef4444; }
+.inline-result-feedback {
+    font-size:13px; color:#a1a1aa; line-height:1.6;
+    white-space:pre-wrap;
+}
 .empty-state {
     text-align:center; padding:48px 24px; color:#52525b;
 }
@@ -569,6 +613,11 @@ body {
         </div>
         <div class="section-label" id="progress-label">Question 1 / 10</div>
         <div class="progress-track"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
+        <div class="question-nav" id="question-nav" style="display:none;">
+            <button class="btn btn-ghost nav-btn" id="btn-prev" onclick="navigateQuestion(-1)" disabled>&larr; Prev</button>
+            <div class="question-dots" id="question-dots"></div>
+            <button class="btn btn-ghost nav-btn" id="btn-nav-next" onclick="navigateQuestion(1)">Next &rarr;</button>
+        </div>
 
         <div class="card">
             <div class="question-meta">
@@ -579,15 +628,26 @@ body {
                     <span id="flag-label">Flag</span>
                 </button>
             </div>
+            <div class="completed-banner" id="completed-banner" style="display:none;">
+                <span id="completed-icon"></span>
+                <span id="completed-label"></span>
+            </div>
+            <div class="inline-result" id="inline-result" style="display:none;">
+                <div class="inline-result-score" id="inline-result-score"></div>
+                <div class="inline-result-feedback" id="inline-result-feedback"></div>
+            </div>
             <div id="question-figure"></div>
             <div class="question-text" id="question-text">Loading...</div>
-            <textarea class="answer-area" id="answer-input" placeholder="Type your answer here..." oninput="autosaveAnswer()"></textarea>
-            <div class="kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to submit</div>
-            <div style="margin-top:16px; display:flex; justify-content:flex-end;">
-                <button class="btn btn-primary" id="btn-submit" onclick="submitAnswer()">
-                    Submit Answer
-                    <span class="spinner" id="spin-submit"></span>
-                </button>
+            <div id="answer-section">
+                <textarea class="answer-area" id="answer-input" placeholder="Type your answer here..." oninput="autosaveAnswer()"></textarea>
+                <div class="kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to submit &middot; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to navigate</div>
+                <div id="question-actions" style="margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
+                    <button class="btn btn-ghost" id="btn-skip" onclick="skipQuestion()" style="color:#9aa0a8;border:1px solid #3a3f47;">Skip</button>
+                    <button class="btn btn-primary" id="btn-submit" onclick="submitAnswer()">
+                        Submit Answer
+                        <span class="spinner" id="spin-submit"></span>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -686,6 +746,8 @@ let consolidateSaveTimer = null;
 let allTopics = [];
 let selectedTopicIds = new Set();
 let questionShownAt = null;  // ms timestamp when current question was rendered
+let questionStates = [];     // 'unanswered' | 'skipped' | 'answered'
+let questionResults = {};     // pos -> {marks_awarded, total_marks, sm2_grade, feedback, error_tags}
 
 let sessionMode = 'daily'; // 'daily' or 'mock'
 let allPapers = [];
@@ -1126,6 +1188,8 @@ async function startMockSession() {
         questions = data.questions;
         currentPos = 0;
         attempts = [];
+        questionStates = questions.map(() => 'unanswered');
+        questionResults = {};
         mockAnswers = new Array(questions.length).fill(null).map(() => ({answer: '', time_spent_seconds: 0}));
         document.getElementById('start-screen').style.display = 'none';
         document.getElementById('question-screen').style.display = 'block';
@@ -1157,6 +1221,8 @@ function pollBuild(buildId) {
                 questions = data.questions;
                 currentPos = 0;
                 attempts = [];
+                questionStates = questions.map(() => 'unanswered');
+                questionResults = {};
                 document.getElementById('start-screen').style.display = 'none';
                 document.getElementById('question-screen').style.display = 'block';
                 showQuestion();
@@ -1179,8 +1245,22 @@ async function resumeSession() {
     sessionId = data.session_id;
     questions = data.questions;
     attempts = (data.attempts || []).map(a => ({...a}));
-    // Find first unanswered position
-    const answeredPos = new Set(attempts.map(a => a.position));
+    questionStates = questions.map(() => 'unanswered');
+    questionResults = {};
+    const answeredPos = new Set();
+    for (const a of attempts) {
+        answeredPos.add(a.position);
+        questionStates[a.position] = (a.user_answer === '[skipped]') ? 'skipped' : 'answered';
+        if (a.user_answer !== '[skipped]') {
+            questionResults[a.position] = {
+                marks_awarded: a.marks_awarded,
+                total_marks: a.total_marks,
+                sm2_grade: a.sm2_grade,
+                feedback: a.feedback,
+                error_tags: a.error_tags || [],
+            };
+        }
+    }
     currentPos = 0;
     for (let i = 0; i < questions.length; i++) {
         if (!answeredPos.has(i)) { currentPos = i; break; }
@@ -1188,9 +1268,7 @@ async function resumeSession() {
     }
     document.getElementById('start-screen').style.display = 'none';
     if (currentPos >= questions.length) {
-        document.getElementById('done-screen').style.display = 'block';
-        document.getElementById('done-summary').textContent =
-            `You answered ${attempts.length} question${attempts.length !== 1 ? 's' : ''}.`;
+        showDoneScreen();
     } else {
         document.getElementById('question-screen').style.display = 'block';
         showQuestion();
@@ -1213,33 +1291,69 @@ async function discardSession() {
 
 function showQuestion() {
     const q = questions[currentPos];
+    const state = questionStates[currentPos] || 'unanswered';
+    const completedCount = questionStates.filter(s => s === 'answered' || s === 'skipped').length;
     document.getElementById('progress-label').textContent = `Question ${currentPos + 1} / ${questions.length}`;
-    document.getElementById('progress-bar').style.width = `${(currentPos / questions.length) * 100}%`;
+    document.getElementById('progress-bar').style.width = `${(completedCount / questions.length) * 100}%`;
     document.getElementById('kind-badge').textContent = q.kind;
     document.getElementById('kind-badge').className = 'badge badge-' + q.kind;
     document.getElementById('marks-display').textContent = q.marks + (q.marks === 1 ? ' mark' : ' marks');
     document.getElementById('question-text').innerHTML = markdownToHtml(q.text);
     renderFigure(q.figure, 'question-figure');
-    // Restore any autosaved draft (or, in mock mode, the previously-typed answer)
-    let restored = '';
-    if (sessionMode === 'mock' && mockAnswers[currentPos] && mockAnswers[currentPos].answer) {
-        restored = mockAnswers[currentPos].answer;
+
+    const completedBanner = document.getElementById('completed-banner');
+    const inlineResult = document.getElementById('inline-result');
+    const answerSection = document.getElementById('answer-section');
+
+    if (state === 'answered' && sessionMode !== 'mock') {
+        const r = questionResults[currentPos];
+        completedBanner.className = 'completed-banner answered';
+        document.getElementById('completed-icon').textContent = '\u2713';
+        document.getElementById('completed-label').textContent = `Answered \u2014 ${r.marks_awarded} / ${r.total_marks} marks`;
+        completedBanner.style.display = 'flex';
+        const pct = r.total_marks ? (r.marks_awarded / r.total_marks) : 0;
+        const scoreClass = pct >= 0.8 ? 'correct' : pct >= 0.5 ? 'partial' : 'incorrect';
+        document.getElementById('inline-result-score').textContent = `${r.marks_awarded} / ${r.total_marks}`;
+        document.getElementById('inline-result-score').className = 'inline-result-score ' + scoreClass;
+        document.getElementById('inline-result-feedback').innerHTML = markdownToHtml(r.feedback || '');
+        inlineResult.style.display = 'block';
+        answerSection.style.display = 'none';
+    } else if (state === 'skipped' && sessionMode !== 'mock') {
+        completedBanner.className = 'completed-banner skipped';
+        document.getElementById('completed-icon').textContent = '\u2298';
+        document.getElementById('completed-label').textContent = 'Skipped \u2014 0 marks';
+        completedBanner.style.display = 'flex';
+        inlineResult.style.display = 'none';
+        answerSection.style.display = 'none';
     } else {
-        restored = loadAutosave(currentPos);
+        completedBanner.style.display = 'none';
+        inlineResult.style.display = 'none';
+        answerSection.style.display = '';
+        let restored = '';
+        if (sessionMode === 'mock' && mockAnswers[currentPos] && mockAnswers[currentPos].answer) {
+            restored = mockAnswers[currentPos].answer;
+        } else {
+            restored = loadAutosave(currentPos);
+        }
+        document.getElementById('answer-input').value = restored;
+        document.getElementById('answer-input').focus();
     }
-    document.getElementById('answer-input').value = restored;
-    document.getElementById('answer-input').focus();
-    // Submit-button label varies by mode
+
     const submitBtn = document.getElementById('btn-submit');
     if (submitBtn && submitBtn.firstChild) {
         submitBtn.firstChild.textContent = sessionMode === 'mock'
             ? (currentPos >= questions.length - 1 ? 'Finish & Submit Paper ' : 'Save & Next ')
             : 'Submit Answer ';
     }
-    // Reset flag UI
+    const skipBtn = document.getElementById('btn-skip');
+    if (skipBtn) {
+        skipBtn.style.display = sessionMode === 'mock' ? 'none' : '';
+    }
     const flagBtn = document.getElementById('btn-flag');
     flagBtn.classList.remove('flagged');
     document.getElementById('flag-label').textContent = 'Flag';
+    document.getElementById('question-nav').style.display = 'flex';
+    updateQuestionDots();
     renderMath(document.getElementById('question-text'));
     questionShownAt = Date.now();
 }
@@ -1254,6 +1368,7 @@ async function submitAnswer() {
 
     // Pre-show result screen with empty feedback for live streaming
     document.getElementById('question-screen').style.display = 'none';
+    document.getElementById('question-nav').style.display = 'none';
     document.getElementById('result-screen').style.display = 'block';
     document.getElementById('result-score').textContent = '...';
     document.getElementById('result-score').className = 'result-score';
@@ -1310,15 +1425,136 @@ async function submitAnswer() {
             markscheme: q.markscheme || '',
             user_answer: answer,
         });
+        questionStates[currentPos] = 'answered';
+        questionResults[currentPos] = {
+            marks_awarded: finalResult.marks_awarded,
+            total_marks: finalResult.total_marks,
+            sm2_grade: finalResult.sm2_grade,
+            feedback: finalResult.feedback,
+            error_tags: finalResult.error_tags || [],
+        };
         clearAutosave(currentPos);
+        updateQuestionDots();
         showResult(finalResult);
     } catch (e) {
         toast(e.message, true);
         // Revert to question screen so user can retry
         document.getElementById('result-screen').style.display = 'none';
         document.getElementById('question-screen').style.display = 'block';
+        document.getElementById('question-nav').style.display = 'flex';
     }
     setLoading('btn-submit', false);
+}
+
+async function skipQuestion() {
+    if (sessionMode === 'mock') {
+        mockAnswers[currentPos] = { answer: '[skipped]', time_spent_seconds: 0 };
+        questionStates[currentPos] = 'skipped';
+        clearAutosave(currentPos);
+        updateQuestionDots();
+        if (currentPos >= questions.length - 1) {
+            finishMockSession();
+        } else {
+            currentPos++;
+            showQuestion();
+        }
+        return;
+    }
+    const elapsed = questionShownAt ? Math.max(0, Math.floor((Date.now() - questionShownAt) / 1000)) : null;
+    try {
+        const res = await fetch('/api/study/skip', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                session_id: sessionId,
+                position: currentPos,
+                time_spent_seconds: elapsed,
+            }),
+        });
+        const data = await res.json();
+        if (!data.ok) { toast(data.error || 'Skip failed', true); return; }
+        attempts.push({
+            marks_awarded: 0,
+            total_marks: data.total_marks || 0,
+            sm2_grade: 0,
+            feedback: 'Skipped without answering.',
+            error_tags: [],
+            position: currentPos,
+            text: questions[currentPos].text,
+            markscheme: questions[currentPos].markscheme || '',
+            user_answer: '[skipped]',
+        });
+        questionStates[currentPos] = 'skipped';
+        questionResults[currentPos] = {
+            marks_awarded: 0,
+            total_marks: data.total_marks || 0,
+            sm2_grade: 0,
+            feedback: 'Skipped without answering.',
+            error_tags: [],
+        };
+        clearAutosave(currentPos);
+        updateQuestionDots();
+        advanceAfterCompletion();
+    } catch (e) {
+        toast(e.message, true);
+    }
+}
+
+function navigateQuestion(delta) {
+    const newPos = currentPos + delta;
+    if (newPos < 0 || newPos >= questions.length) return;
+    autosaveAnswer();
+    currentPos = newPos;
+    showQuestion();
+}
+
+function advanceAfterCompletion() {
+    const nextUnanswered = questionStates.findIndex((s, i) => s === 'unanswered' && i > currentPos);
+    if (nextUnanswered !== -1) {
+        currentPos = nextUnanswered;
+        showQuestion();
+    } else {
+        const firstUnanswered = questionStates.findIndex(s => s === 'unanswered');
+        if (firstUnanswered !== -1) {
+            currentPos = firstUnanswered;
+            showQuestion();
+        } else {
+            showDoneScreen();
+        }
+    }
+}
+
+function showDoneScreen() {
+    document.getElementById('question-screen').style.display = 'none';
+    document.getElementById('result-screen').style.display = 'none';
+    document.getElementById('done-screen').style.display = 'block';
+    const total = questions.length;
+    const answered = questionStates.filter(s => s === 'answered').length;
+    const skipped = questionStates.filter(s => s === 'skipped').length;
+    document.getElementById('done-summary').textContent =
+        `You completed ${total} question${total !== 1 ? 's' : ''} (${answered} answered, ${skipped} skipped).`;
+}
+
+function updateQuestionDots() {
+    const dotsEl = document.getElementById('question-dots');
+    if (!dotsEl) return;
+    let html = '';
+    for (let i = 0; i < questions.length; i++) {
+        const cls = i === currentPos ? 'current' : (questionStates[i] || 'unanswered');
+        html += `<div class="question-dot ${cls}" onclick="goToQuestion(${i})" title="Question ${i+1}"></div>`;
+    }
+    dotsEl.innerHTML = html;
+    const prevBtn = document.getElementById('btn-prev');
+    const nextBtn = document.getElementById('btn-nav-next');
+    if (prevBtn) prevBtn.disabled = currentPos <= 0;
+    if (nextBtn) nextBtn.disabled = currentPos >= questions.length - 1;
+}
+
+function goToQuestion(pos) {
+    if (pos < 0 || pos >= questions.length) return;
+    autosaveAnswer();
+    currentPos = pos;
+    showQuestion();
 }
 
 /** Mock paper: store the answer locally and advance — no grading until Finish. */
@@ -1331,7 +1567,9 @@ function submitMockAnswer() {
         answer: (answer || '').trim(),
         time_spent_seconds: (mockAnswers[currentPos].time_spent_seconds || 0) + elapsed,
     };
+    questionStates[currentPos] = 'answered';
     clearAutosave(currentPos);
+    updateQuestionDots();
     if (currentPos >= questions.length - 1) {
         finishMockSession();
     } else {
@@ -1390,20 +1628,25 @@ function showResult(data) {
     scoreEl.className = 'result-score ' + (pct >= 0.8 ? 'correct' : pct >= 0.5 ? 'partial' : 'incorrect');
     document.getElementById('result-sm2').textContent = `SM-2 grade: ${data.sm2_grade} / 5`;
     fbEl.innerHTML = markdownToHtml(data.feedback);
-    const isLast = currentPos >= questions.length - 1;
-    document.getElementById('next-label').textContent = isLast ? 'Finish Session' : 'Next Question';
+    const nextUnanswered = questionStates.findIndex((s, i) => s === 'unanswered' && i > currentPos);
+    const allDone = questionStates.every(s => s === 'answered' || s === 'skipped');
+    const label = allDone ? 'Finish Session' : (nextUnanswered !== -1 ? 'Next Question' : 'Finish Session');
+    document.getElementById('next-label').textContent = label;
     document.getElementById('btn-next').disabled = false;
     renderMath(fbEl);
 }
 
 function nextQuestion() {
     document.getElementById('result-screen').style.display = 'none';
-    currentPos++;
-    if (currentPos >= questions.length) {
-        document.getElementById('done-screen').style.display = 'block';
-        document.getElementById('done-summary').textContent =
-            `You answered ${attempts.length} question${attempts.length !== 1 ? 's' : ''}.`;
+    document.getElementById('question-nav').style.display = 'flex';
+    const allDone = questionStates.every(s => s === 'answered' || s === 'skipped');
+    if (allDone) {
+        showDoneScreen();
     } else {
+        currentPos++;
+        if (currentPos >= questions.length) {
+            currentPos = questionStates.findIndex(s => s === 'unanswered');
+        }
         document.getElementById('question-screen').style.display = 'block';
         showQuestion();
     }
@@ -1540,11 +1783,20 @@ document.addEventListener('keydown', (e) => {
         }
         return;
     }
-    // Question screen: Ctrl+Enter submits
+    // Question screen: Ctrl+Enter submits, Escape skips, arrows navigate
     if (document.getElementById('question-screen').style.display !== 'none') {
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
             e.preventDefault();
             submitAnswer();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            skipQuestion();
+        } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            navigateQuestion(-1);
+        } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            navigateQuestion(1);
         }
     }
     // Result screen: → advances

@@ -46,7 +46,7 @@ QUESTIONS_SCHEMA = {
                     "qnum": {"type": "string", "description": "e.g. '3(b)(ii)' or '7'"},
                     "text": {
                         "type": "string",
-                        "description": "Full question text including any sub-stems and given values. Use Unicode for symbols. Use $...$ for inline math.",
+                        "description": "Full question text including any sub-stems and given values. Use Unicode for symbols and $...$ for inline math where LaTeX improves readability (e.g. $E = mc^2$, $v = u + at$).",
                     },
                     "marks": {"type": "integer"},
                     "topic_codes": {
@@ -109,11 +109,21 @@ Section B (structured questions):
 - The markscheme uses tables with columns: Question, Answer, Marks, Guidance.
 - Extract EACH row as a separate entry at whatever granularity the markscheme uses.
 - qnum format: "16(a)", "17(b)(i)", "21(a)(ii)(1)" — always with parentheses for sub-parts.
-- markscheme: ALL text from Answer, Marks, and Guidance columns combined.
+- markscheme: For each question part, repeat the question part text above the marking points, so the reader can see which question each mark refers to. Format each part as:
+
+  16(a) [question text or summary from the paper]
+  M1: ...
+  A1: ...
+  
+  16(b)(i) [question text or summary from the paper]
+  B1: ...
 
 CRITICAL:
 - Extract EVERY entry — do not skip MCQs or structured questions.
 - Include marking points (M1, A1, B1), acceptable answers, and examiner guidance.
+- ALL mathematical expressions, equations, symbols, and variables must be in LaTeX: $...$ for inline math.
+  Examples: $F=ma$, $\\Delta E = mc^2$, $v = u + at$, $3.2 \\times 10^{-19}\\,\\mathrm{C}$, $\\lambda = \\frac{d \\sin\\theta}{n}$.
+  Never use bare Unicode approximations like ², ⁻¹, →, or × outside of LaTeX delimiters — always use proper LaTeX.
 - Output must be valid JSON.
 """
 
