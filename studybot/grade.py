@@ -243,10 +243,12 @@ def record_attempt(
             )
 
         topic_rows = conn.execute(
-            "SELECT topic_id FROM question_topics WHERE question_id = ?", (question_id,)
+            "SELECT qt.topic_id, t.code FROM question_topics qt JOIN topics t ON t.id = qt.topic_id WHERE qt.question_id = ?",
+            (question_id,),
         ).fetchall()
         for tr in topic_rows:
             tid = tr["topic_id"]
+            tcode = tr["code"] or ""
             m = conn.execute(
                 "SELECT ease, interval_days, repetitions, score FROM mastery WHERE topic_id = ?",
                 (tid,),
@@ -267,7 +269,9 @@ def record_attempt(
                 repetitions=repetitions,
                 grade=grade_result["sm2_grade"],
             )
-            new_score = update_mastery(score, grade_result["sm2_grade"])
+            # Module 1 and Module 2 are foundational one-off skills — progress 3x faster
+            alpha = 0.6 if tcode.startswith(("1.", "2.")) else 0.2
+            new_score = update_mastery(score, grade_result["sm2_grade"], alpha=alpha)
             conn.execute(
                 "UPDATE mastery SET ease=?, interval_days=?, repetitions=?, score=?, "
                 "last_reviewed=?, next_review=? WHERE topic_id=?",

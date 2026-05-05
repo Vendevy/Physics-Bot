@@ -43,10 +43,10 @@ def update_sm2(
     return new_ease, new_interval, new_reps
 
 
-def update_mastery(prev: float, grade: int) -> float:
-    """EMA of normalized grade. grade/5, alpha=0.4."""
+def update_mastery(prev: float, grade: int, *, alpha: float = 0.2) -> float:
+    """EMA of normalized grade. grade/5, alpha controls learning rate."""
     target = grade / 5.0
-    return round(0.8 * prev + 0.2 * target, 4)
+    return round((1 - alpha) * prev + alpha * target, 4)
 
 
 def next_review_iso(interval_days: int) -> str:
