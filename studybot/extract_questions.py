@@ -37,11 +37,13 @@ else:
 
 QUESTIONS_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "questions": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "qnum": {"type": "string", "description": "e.g. '3(b)(ii)' or '7'"},
                     "text": {
@@ -64,11 +66,13 @@ QUESTIONS_SCHEMA = {
 
 MARKSCHEME_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "markschemes": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "qnum": {"type": "string", "description": "Question number, e.g. '3(b)(ii)'"},
                     "markscheme": {

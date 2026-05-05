@@ -6,7 +6,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from . import llm
-from .config import DAILY_NEW, DAILY_RECALL, VALIDATE_MODEL
+from . import llm_openai
+from .config import DAILY_NEW, DAILY_RECALL, GEN_PROVIDER, GEN_MODEL, VALIDATE_MODEL
 from .db import connect
 from .srs import today_iso
 
@@ -19,43 +20,41 @@ GEN_SCHEMA = {
         "markscheme": {"type": "string", "description": "Marking points with marks (M1/A1/B1 style) and acceptable alternatives. All mathematical expressions, equations, symbols, and variables must be in LaTeX using $...$ for inline math. Examples: $F=ma$, $\\Delta E = mc^2$, $v = u + at$, $3.2 \\times 10^{-19}\\,\\mathrm{C}$. For multi-part questions, the markscheme MUST be structured with the question part (including its text) above the marks for that part, so the reader can see which question each marking point belongs to. Example format:\n\n(a) Calculate the maximum speed of the cart. [2]\nM1: use of $E_k = \\frac{1}{2}mv^2$\nA1: $v = 4.7\\,\\mathrm{m\\,s^{-1}}$\n\n(b)(i) Explain why the speed decreases. [3]\nB1: reference to work done against friction\nB1: $E_k$ is converted to thermal energy\nB1: net force decelerates the cart\n\nDo NOT write the markscheme as a single undifferentiated block."},
         "scenario": {"type": "string", "description": "1-4 kebab-case words naming the physical scenario, e.g. 'skydiver-terminal-velocity', 'copper-tube-magnet-brake', 'loop-the-loop-min-speed'. Used to dedupe future generations."},
         "figure": {
-            "type": ["object", "null"],
-            "description": (
-                "Graph data shown beside the question. Set to null for almost all questions. "
-                "Only provide a figure when the question genuinely requires the student to read or analyse a graph "
-                "(e.g. 'using the graph below, determine the gradient'). Never include a figure if the question asks "
-                "the student to plot or draw something themselves."
-            ),
+            "type": "object",
             "additionalProperties": False,
+            "description": (
+                "Graph data or SVG diagram shown beside the question. Omit this field entirely when no visual is needed. "
+                "For graphs (line/scatter/bar), provide chart data. "
+                "For diagrams (circuits, force diagrams, ray diagrams, free-body diagrams, experimental setups), "
+                "provide an inline SVG in the 'svg' field. The SVG must:\n"
+                "- Be a complete, self-contained <svg> element with viewBox\n"
+                "- Be no wider than 600px and no taller than 400px\n"
+                "- Use LIGHT-coloured strokes (white #e4e4e7, light grey #a1a1aa) on a transparent background so the diagram is visible on a dark UI. Do NOT use black or dark grey strokes.\n"
+                "- Include readable labels in a sans-serif font\n"
+                "- Use standard conventions (e.g. circuit symbols, arrowheads, dashed lines for virtual images)\n"
+                "Never include a figure if the question asks the student to plot, sketch, or draw something themselves."
+            ),
             "properties": {
-                "type": {"type": "string", "enum": ["line", "scatter", "bar"]},
-                "title": {"type": "string", "description": "Short caption shown above the chart"},
-                "xlabel": {"type": "string", "description": "x-axis label including units, e.g. 'Time / s'"},
-                "ylabel": {"type": "string", "description": "y-axis label including units, e.g. 'Velocity / m s^-1'"},
-                "x": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                    "description": "x values; for bar charts these are category positions"
-                },
+                "type": {"type": "string", "enum": ["line", "scatter", "bar", "svg"]},
+                "title": {"type": "string"},
+                "xlabel": {"type": "string"},
+                "ylabel": {"type": "string"},
+                "x": {"type": "array", "items": {"type": "number"}},
                 "series": {
-                    "type": "array",
-                    "minItems": 1,
-                    "description": "One or more data series. Each y array must have the same length as x.",
+                    "type": "array", "minItems": 1,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
-                        "properties": {
-                            "name": {"type": "string"},
-                            "y": {"type": "array", "items": {"type": "number"}}
-                        },
+                        "properties": {"name": {"type": "string"}, "y": {"type": "array", "items": {"type": "number"}}},
                         "required": ["name", "y"]
                     }
-                }
+                },
+                "svg": {"type": "string", "description": "Complete inline SVG element for the diagram."}
             },
-            "required": ["type", "title", "xlabel", "ylabel", "x", "series"]
+            "required": ["type", "title"]
         }
     },
-    "required": ["text", "marks", "markscheme", "figure", "scenario"],
+    "required": ["text", "marks", "markscheme", "scenario"],
 }
 
 VALIDATE_SCHEMA = {
@@ -64,7 +63,7 @@ VALIDATE_SCHEMA = {
     "properties": {
         "pass": {"type": "boolean", "description": "Whether the question is correct, solvable, and self-consistent"},
         "issues": {"type": "string", "description": "Comma-separated list of issues found, or 'none' if passing"},
-        "corrected_markscheme": {"type": ["string", "null"], "description": "Corrected markscheme if there were issues, null if passing or no correction needed"},
+        "corrected_markscheme": {"type": "string", "description": "Corrected markscheme if there were issues, empty string if passing or no correction needed"},
     },
     "required": ["pass", "issues", "corrected_markscheme"],
 }
@@ -76,7 +75,7 @@ Check the following:
 2. CONSISTENCY — Are all given values self-consistent? (e.g. if V=12 V and R=4 Ω are both given, I must equal 3 A by Ohm's law; if they conflict, flag it.)
 3. MARKSCHEME ACCURACY — Does the markscheme correctly solve the question as stated? Do the marking points (M1, A1, B1) add up to the total marks? Does the final answer match the given values?
 4. COMPLETENESS — Are all sub-parts of the question addressed in the markscheme?
-5. FIGURES — If a figure is provided, does the question text reference it and are the data realistic?
+5. FIGURES — If a figure is provided, does the question text reference it and are the data realistic? For SVG diagrams, are the physics and conventions correct (correct circuit symbols, ray directions, force vectors, etc.)?
 6. LATEX FORMATTING — Are all mathematical expressions, equations, and symbols in the markscheme wrapped in $...$ LaTeX? There should be no bare Unicode math symbols (like ², ⁻¹, ×, →) outside of LaTeX delimiters.
 
 Be lenient — only flag genuine errors that would prevent a student from answering correctly or make the markscheme wrong. Minor phrasing issues or alternative valid wordings are acceptable."""
@@ -186,10 +185,12 @@ Scenario tag:
 - The `scenario` field is a 1-4 kebab-case-word label naming the physical setup (e.g. "skydiver-terminal-velocity", "copper-tube-magnet-brake", "planet-with-different-g"). Make it specific enough that two questions on the same topic with different scenarios get different tags.
 
 Figures:
-- Set `figure` to null for almost every question.
-- Only provide a `figure` when the question literally cannot be answered without reading values or trends from a graph.
-- Never include a `figure` for questions that ask the student to plot or sketch something themselves.
-- When you do include a figure, the question text must reference it (e.g. "The graph above shows..."). Use realistic numerical data with sensible units.
+- Omit the `figure` field when no visual aid is needed.
+- Only provide a `figure` when the question genuinely benefits from one:
+  * Graph (type: line/scatter/bar) — when the student must read values or trends from a graph.
+  * SVG diagram (type: svg) — when the question involves a circuit diagram, free-body diagram, ray diagram (lenses/mirrors), force/moment diagram, experimental setup schematic, or any geometry-dependent scenario. The question text must reference the diagram (e.g. "In the circuit shown below...", "The diagram below shows...").
+- Never include a `figure` for questions that ask the student to plot, sketch, or draw something themselves.
+- For SVG diagrams: generate clean, accurate diagrams following standard physics conventions. Circuits use standard symbols. Force diagrams use arrow vectors. Ray diagrams show lenses/mirrors with principal axis, focal points, and ray paths. Use light-coloured strokes (white, light grey) so the diagram is clearly visible on a dark background — never use black or dark grey.
 """
 
 
@@ -334,9 +335,35 @@ def _style_exemplar_for_topic(topic_id: int) -> str | None:
         return row["snippet"] if row else None
 
 
+def _llm_json(
+    *,
+    system: str,
+    user_text: str,
+    schema: dict,
+    model: str,
+    max_tokens: int = 16000,
+) -> Any:
+    print(f"  [DEBUG] _llm_json: provider={GEN_PROVIDER}, model={model}")
+    if GEN_PROVIDER == "deepseek":
+        return llm_openai.call_json_openai(
+            system=system, user_text=user_text, schema=schema,
+            model=model, max_tokens=max_tokens,
+        )
+    else:
+        return llm.call_json(
+            system=system,
+            user_blocks=[llm.text_block(user_text)],
+            schema=schema,
+            model=model,
+            max_tokens=max_tokens,
+            cache_system=True,
+        )
+
+
 def _validate_question(q: dict, subject_name: str, board: str, topic_content: str) -> dict:
     """Validate a generated question for solvability, consistency, and markscheme accuracy.
     Returns dict with keys: 'pass' (bool), 'issues' (str), 'corrected' (str|None)."""
+    print(f"[DEBUG] _validate_question: marks={q.get('marks', '?')} model={VALIDATE_MODEL}")
     parts = [
         f"Subject: {subject_name} ({board})",
         f"Topic spec: {topic_content}",
@@ -346,14 +373,25 @@ def _validate_question(q: dict, subject_name: str, board: str, topic_content: st
     if q.get("figure"):
         parts.append(f"Figure data: {json.dumps(q['figure'])}")
 
-    result = llm.call_json(
-        system=VALIDATE_SYSTEM,
-        user_blocks=[llm.text_block("\n\n".join(parts))],
-        schema=VALIDATE_SCHEMA,
-        cache_system=False,
-        model=VALIDATE_MODEL,
-        max_tokens=1000,
-    )
+    user_text = "\n\n".join(parts)
+    max_tokens = 2000
+    for attempt in range(3):
+        try:
+            result = llm.call_json(
+                system=VALIDATE_SYSTEM,
+                user_blocks=[llm.text_block(user_text)],
+                schema=VALIDATE_SCHEMA,
+                cache_system=False,
+                model=VALIDATE_MODEL,
+                max_tokens=max_tokens,
+            )
+            break
+        except Exception as e:
+            if attempt < 2:
+                max_tokens *= 2
+                print(f"  [DEBUG] Validation failed (attempt {attempt + 1}), retrying with max_tokens={max_tokens}")
+            else:
+                raise
     return {
         "pass": bool(result.get("pass", False)),
         "issues": result.get("issues", ""),
@@ -368,13 +406,16 @@ def generate_question(
     board: str,
     difficulty: int = 3,
     use_past_paper_style: bool = True,
+    model: str | None = None,
 ) -> dict:
     """Generate one fresh question for a topic. Returns dict with text, marks, markscheme.
 
     `use_past_paper_style`: when True (default), inject one short past-paper snippet on
     the same topic as a style anchor (form-only). When False, generate purely from the
     spec content + do-not-repeat list, no past-paper anchoring.
+    `model`: override the generation model; defaults to GEN_MODEL.
     """
+    print(f"[DEBUG] generate_question: topic={topic.get('code')} model={model or GEN_MODEL}")
     score = topic.get("score", 0.0) or 0.0
     diff_label = DIFFICULTY_LABELS.get(difficulty, DIFFICULTY_LABELS[3])
 
@@ -424,12 +465,12 @@ def generate_question(
     )
     user_text = "\n\n".join(parts)
 
-    return llm.call_json(
+    return _llm_json(
         system=_gen_system(subject_name, board, difficulty),
-        user_blocks=[llm.text_block(user_text)],
+        user_text=user_text,
         schema=GEN_SCHEMA,
-        cache_system=True,
-        max_tokens=2000,
+        model=model or GEN_MODEL,
+        max_tokens=6000,
     )
 
 
@@ -443,6 +484,7 @@ def build_session(
     validate: bool = True,
     progress_cb: Callable[[int, int, str], None] | None = None,
     max_workers: int = 4,
+    gen_model: str | None = None,
 ) -> int:
     """Create a new session row, populate session_questions with new + recall.
     Generated questions are persisted into the questions table with source='generated'.
@@ -455,10 +497,13 @@ def build_session(
     `validate` — when True, each generated question is checked by a validation call;
     if it fails, the question is regenerated (up to MAX_VALIDATE_RETRIES times).
     If the validation provides a corrected markscheme, the correction is applied.
+    `gen_model` — override the generation model; defaults to GEN_MODEL from config.
 
     `progress_cb(done, total, label)` is called as each question finishes generating,
     so callers (e.g. the web UI) can stream status to the user.
     """
+    gen_model = gen_model or GEN_MODEL
+    print(f"[DEBUG] build_session start: subject_id={subject_id}, n_new={n_new}, difficulty={difficulty}, model={gen_model}, validate={validate}")
     with connect() as conn:
         subject = conn.execute(
             "SELECT name, board FROM subjects WHERE id = ?", (subject_id,)
@@ -489,6 +534,7 @@ def build_session(
             board=board,
             difficulty=difficulty,
             use_past_paper_style=use_past_paper_style,
+            model=gen_model,
         )
         if not validate:
             return q
@@ -507,6 +553,7 @@ def build_session(
                     board=board,
                     difficulty=difficulty,
                     use_past_paper_style=use_past_paper_style,
+                    model=gen_model,
                 )
             else:
                 print(f"    Using unvalidated question after {MAX_VALIDATE_RETRIES + 1} attempts")

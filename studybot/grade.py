@@ -14,7 +14,8 @@ import re
 from typing import Iterator
 
 from . import llm
-from .config import GRADER_MODEL
+from . import llm_openai
+from .config import GEN_PROVIDER, GEN_MODEL, GRADER_MODEL
 from .db import connect
 from .srs import next_review_iso, today_iso, update_mastery, update_sm2
 
@@ -91,6 +92,53 @@ def _build_user_blocks(question: dict, user_answer: str) -> list[dict]:
     return [llm.text_block(stable, cache=True), llm.text_block(answer)]
 
 
+def _blocks_to_user_text(user_blocks: list[dict]) -> str:
+    """Flatten Anthropic-format content blocks to a single user text string for OpenAI-compatible APIs."""
+    return "".join(b["text"] for b in user_blocks if b.get("type") == "text")
+
+
+def _grade_model() -> str:
+    if GEN_PROVIDER == "deepseek":
+        return GEN_MODEL
+    return GRADER_MODEL
+
+
+def _llm_text(*, system: str, user_blocks: list[dict], model: str, max_tokens: int = 2000) -> str:
+    if GEN_PROVIDER == "deepseek":
+        return llm_openai.call_text_openai(
+            system=system,
+            user_text=_blocks_to_user_text(user_blocks),
+            model=model,
+            max_tokens=max_tokens,
+        )
+    else:
+        return llm.call_text(
+            system=system,
+            user_blocks=user_blocks,
+            cache_system=True,
+            model=model,
+            max_tokens=max_tokens,
+        )
+
+
+def _llm_stream(*, system: str, user_blocks: list[dict], model: str, max_tokens: int = 2000):
+    if GEN_PROVIDER == "deepseek":
+        return llm_openai.stream_text_openai(
+            system=system,
+            user_text=_blocks_to_user_text(user_blocks),
+            model=model,
+            max_tokens=max_tokens,
+        )
+    else:
+        return llm.stream_text(
+            system=system,
+            user_blocks=user_blocks,
+            cache_system=True,
+            model=model,
+            max_tokens=max_tokens,
+        )
+
+
 def _parse(text: str, total_marks: int) -> dict:
     m = _MARKS_RE.search(text)
     s = _SM2_RE.search(text)
@@ -130,11 +178,10 @@ def _load_question(question_id: int) -> dict:
 
 def grade_answer(question_id: int, user_answer: str) -> dict:
     q = _load_question(question_id)
-    text = llm.call_text(
+    text = _llm_text(
         system=GRADE_SYSTEM,
         user_blocks=_build_user_blocks(q, user_answer),
-        cache_system=True,
-        model=GRADER_MODEL,
+        model=_grade_model(),
         max_tokens=2000,
     )
     return _parse(text, q["marks"])
@@ -147,11 +194,10 @@ def grade_answer_stream(question_id: int, user_answer: str) -> Iterator[dict]:
     """
     q = _load_question(question_id)
     full = ""
-    for piece in llm.stream_text(
+    for piece in _llm_stream(
         system=GRADE_SYSTEM,
         user_blocks=_build_user_blocks(q, user_answer),
-        cache_system=True,
-        model=GRADER_MODEL,
+        model=_grade_model(),
         max_tokens=2000,
     ):
         if isinstance(piece, dict) and "__final__" in piece:

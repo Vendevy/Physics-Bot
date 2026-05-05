@@ -65,6 +65,13 @@ body {
     flex-wrap:wrap;
 }
 .question-marks { font-size:13px; color:#71717a; font-weight:500; }
+.paper-link {
+    font-size:12px; color:#818cf8; text-decoration:none;
+    border:1px solid rgba(129,140,248,0.2); border-radius:6px;
+    padding:3px 8px; background:rgba(129,140,248,0.06);
+    transition:background 0.15s;
+}
+.paper-link:hover { background:rgba(129,140,248,0.12); }
 .question-text {
     font-size:15px; color:#e4e4e7; line-height:1.7; margin-bottom:24px;
 }
@@ -131,6 +138,11 @@ body {
 }
 .btn-flag:hover { background:rgba(239,68,68,0.08); border-color:rgba(239,68,68,0.4); }
 .btn-flag.flagged { background:rgba(239,68,68,0.12); border-color:rgba(239,68,68,0.5); }
+.btn-export {
+    background:transparent; border:1px solid rgba(34,211,238,0.2);
+    color:#22d3ee; padding:6px 10px; font-size:12px; gap:4px;
+}
+.btn-export:hover { background:rgba(34,211,238,0.08); border-color:rgba(34,211,238,0.4); }
 .spinner {
     display:none; width:14px; height:14px;
     border:2px solid transparent; border-top-color:currentColor; border-radius:50%;
@@ -514,10 +526,13 @@ body {
     <!-- START SCREEN -->
     <div id="start-screen">
         <div id="resume-banner" class="resume-banner">
-            <span class="resume-text" id="resume-text">You have an unfinished session. Resume it?</span>
+            <div style="flex:1;">
+                <span class="resume-text" id="resume-text">You have unfinished sessions</span>
+                <select id="resume-select" style="display:none; margin-top:8px; background:#18181b; color:#e4e4e7; border:1px solid rgba(255,255,255,0.1); border-radius:6px; padding:6px 10px; font-size:13px; width:100%; max-width:320px;"></select>
+            </div>
             <div class="resume-actions">
-                <button class="btn btn-ghost" onclick="discardSession()">Discard</button>
-                <button class="btn btn-primary" onclick="resumeSession()">Resume</button>
+                <button class="btn btn-ghost" onclick="discardSelectedSession()">Discard</button>
+                <button class="btn btn-primary" onclick="resumeSelectedSession()">Resume</button>
             </div>
         </div>
         <div class="card" style="padding:48px 32px;">
@@ -572,6 +587,11 @@ body {
                     </select>
                 </div>
                 <div class="opt-cell">
+                    <div class="opt-label">Model</div>
+                    <select class="diff-select" id="select-model">
+                    </select>
+                </div>
+                <div class="opt-cell">
                     <div class="opt-label">Past-paper style anchor</div>
                     <label class="opt-row" style="cursor:pointer; user-select:none;">
                         <input type="checkbox" id="input-use-past-paper-style" checked>
@@ -623,6 +643,11 @@ body {
             <div class="question-meta">
                 <span class="badge" id="kind-badge">NEW</span>
                 <span class="question-marks" id="marks-display">5 marks</span>
+                <a class="paper-link" id="paper-link" href="#" target="_blank" style="display:none;"></a>
+                <button class="btn btn-export" id="btn-export" onclick="exportCurrent()" title="Export this question">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span>Export</span>
+                </button>
                 <button class="btn btn-flag" id="btn-flag" onclick="flagCurrent()" title="Report a problem with this question">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
                     <span id="flag-label">Flag</span>
@@ -844,7 +869,25 @@ function renderFigure(figure, containerId) {
     // Tear down any prior chart in this container
     const prior = _activeCharts.get(containerId);
     if (prior) { try { prior.destroy(); } catch (e) {} _activeCharts.delete(containerId); }
-    if (!figure || !figure.series || !figure.x) {
+    if (!figure) {
+        wrap.innerHTML = '';
+        return;
+    }
+    // SVG diagram
+    if (figure.type === 'svg' && figure.svg) {
+        const titleHtml = figure.title
+            ? `<div class="figure-title">${escapeHtml(figure.title)}</div>` : '';
+        wrap.innerHTML = `
+            <div class="figure-wrap">
+                ${titleHtml}
+                <div class="figure-svg-box" style="width:100%;max-width:600px;margin:0 auto;overflow:auto;">
+                    ${figure.svg}
+                </div>
+            </div>`;
+        return;
+    }
+    // Chart (legacy)
+    if (!figure.series || !figure.x) {
         wrap.innerHTML = '';
         return;
     }
@@ -931,15 +974,103 @@ function escapeHtml(text) {
 }
 function markdownToHtml(md) {
     if (md == null) return '';
-    const escaped = escapeHtml(md);
-    // Inline formatting first
-    let s = escaped
-        .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
-        .replace(/\\*(.+?)\\*/g, '<em>$1</em>')
-        .replace(/`(.+?)`/g, '<code style="background:rgba(255,255,255,0.06);padding:2px 5px;border-radius:4px;font-family:monospace;font-size:12px;">$1</code>');
-    // Block: split on blank lines into paragraphs, single \\n becomes <br>
-    const paras = s.split(/\\n{2,}/).map(p => '<p>' + p.replace(/\\n/g, '<br>') + '</p>');
-    return paras.join('');
+    // Tables: split into segments, tables become <table>, rest stays markdown
+    const segments = splitTables(escapeHtml(md));
+    return segments.map(seg => {
+        if (seg.table) return renderTable(seg.rows, seg.aligns);
+        // Regular text: inline formatting + paragraphs
+        let s = seg.text
+            .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
+            .replace(/\\*(.+?)\\*/g, '<em>$1</em>')
+            .replace(/`(.+?)`/g, '<code style="background:rgba(255,255,255,0.06);padding:2px 5px;border-radius:4px;font-family:monospace;font-size:12px;">$1</code>');
+        return s.split(/\\n{2,}/).map(p => '<p>' + p.replace(/\\n/g, '<br>') + '</p>').join('');
+    }).join('');
+}
+
+function splitTables(text) {
+    const parts = [];
+    const lines = text.split('\\n');
+    let buf = [];
+    let inTable = false;
+    let tableLines = [];
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        const isTableRow = line.startsWith('|') && line.endsWith('|') && line.indexOf('|') !== line.lastIndexOf('|');
+        const isSep = /^\\|[\\s\\-:|]+\\|$/.test(line);
+        if (isTableRow && !isSep) {
+            if (!inTable) {
+                if (buf.length) { parts.push({text: buf.join('\\n')}); buf = []; }
+                inTable = true;
+            }
+            tableLines.push(line);
+        } else {
+            if (inTable && isSep) {
+                // separator row — parse aligns, skip
+                tableLines.push(line);
+                continue;
+            }
+            if (inTable && tableLines.length >= 2) {
+                // flush table
+                const aligns = parseAligns(tableLines[1]);
+                const rows = tableLines[0].split('|').map(c => c.trim()).filter(c => c) // header
+                    .concat(tableLines.slice(2).map(r =>
+                        r.split('|').map(c => c.trim()).filter(c => c || '')
+                    ));
+                // reconstruct rows as arrays of cells
+                const headerRow = tableLines[0].split('|').map(c => c.trim()).filter(c => c);
+                const dataRows = tableLines.slice(2).map(r =>
+                    r.split('|').map(c => c.trim()).slice(1, -1)
+                );
+                parts.push({table: true, rows: [headerRow, ...dataRows], aligns});
+                tableLines = [];
+                inTable = false;
+            }
+            buf.push(lines[i]);
+        }
+    }
+    if (tableLines.length >= 2 && inTable) {
+        const aligns = parseAligns(tableLines[1]);
+        const headerRow = tableLines[0].split('|').map(c => c.trim()).filter(c => c);
+        const dataRows = tableLines.slice(2).map(r =>
+            r.split('|').map(c => c.trim()).slice(1, -1)
+        );
+        parts.push({table: true, rows: [headerRow, ...dataRows], aligns});
+    }
+    if (buf.length) parts.push({text: buf.join('\\n')});
+    return parts;
+}
+
+function parseAligns(sepLine) {
+    return sepLine.split('|').map(c => c.trim()).filter(c => c).map(c => {
+        if (c.startsWith(':') && c.endsWith(':')) return 'center';
+        if (c.endsWith(':')) return 'right';
+        return 'left';
+    });
+}
+
+function renderTable(rows, aligns) {
+    const header = rows[0];
+    const data = rows.slice(1);
+    const cols = header.length;
+    const style = 'border-collapse:collapse;width:100%;margin:12px 0;font-size:13px;';
+    const thStyle = 'border:1px solid rgba(255,255,255,0.12);padding:6px 10px;background:rgba(255,255,255,0.04);font-weight:600;text-align:';
+    const tdStyle = 'border:1px solid rgba(255,255,255,0.08);padding:6px 10px;text-align:';
+    let html = `<table style="${style}"><thead><tr>`;
+    for (let i = 0; i < cols; i++) {
+        const align = (aligns[i] || 'left');
+        html += `<th style="${thStyle}${align}">${header[i] || ''}</th>`;
+    }
+    html += '</tr></thead><tbody>';
+    for (const row of data) {
+        html += '<tr>';
+        for (let i = 0; i < cols; i++) {
+            const align = (aligns[i] || 'left');
+            html += `<td style="${tdStyle}${align}">${row[i] || ''}</td>`;
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    return html;
 }
 
 /* ----- localStorage autosave (fix #8) ----- */
@@ -997,6 +1128,19 @@ async function loadPapers() {
     } catch (e) {
         document.getElementById('select-paper').innerHTML = `<option value="">Error: ${escapeHtml(e.message)}</option>`;
     }
+}
+
+async function loadModelOptions() {
+    try {
+        const res = await fetch('/api/model-options');
+        const data = await res.json();
+        if (!data.ok) return;
+        const sel = document.getElementById('select-model');
+        sel.innerHTML = data.providers.map(p => {
+            const selected = p.id === data.current_provider ? ' selected' : '';
+            return `<option value="${p.model}" data-provider="${p.id}"${selected}>${p.label}</option>`;
+        }).join('');
+    } catch (e) { /* silent — keep empty dropdown */ }
 }
 
 function onPaperChange() {
@@ -1125,12 +1269,24 @@ async function checkResume() {
         const url = '/api/study/resume' + (SUBJECT_ID ? `?subject_id=${encodeURIComponent(SUBJECT_ID)}` : '');
         const res = await fetch(url);
         const data = await res.json();
-        if (data.ok && data.session_id) {
-            window._resumeData = data;
+        if (data.ok && data.sessions && data.sessions.length > 0) {
+            window._resumeSessions = data.sessions;
             const banner = document.getElementById('resume-banner');
-            const remaining = data.questions.length - data.attempts.length;
-            document.getElementById('resume-text').textContent =
-                `Unfinished session: ${data.attempts.length}/${data.questions.length} answered. Resume?`;
+            const select = document.getElementById('resume-select');
+            const text = document.getElementById('resume-text');
+            
+            if (data.sessions.length === 1) {
+                text.textContent = `Unfinished session: ${data.sessions[0].done}/${data.sessions[0].total} answered. Resume?`;
+                select.style.display = 'none';
+            } else {
+                text.textContent = `${data.sessions.length} unfinished sessions`;
+                select.style.display = 'block';
+                select.innerHTML = data.sessions.map((s, i) => {
+                    const date = new Date(s.started_at).toLocaleDateString();
+                    const mode = s.mode === 'mock_paper' ? 'Mock' : 'Daily';
+                    return `<option value="${s.session_id}">${mode} · ${date} · ${s.done}/${s.total} done</option>`;
+                }).join('');
+            }
             banner.classList.add('active');
         }
     } catch (e) { /* silent */ }
@@ -1148,7 +1304,14 @@ async function startSession() {
     document.getElementById('build-progress-current').textContent = '';
     try {
         const usePastPaperStyle = document.getElementById('input-use-past-paper-style')?.checked ?? true;
-        const body = {n_new: nNew, difficulty: difficulty, use_past_paper_style: usePastPaperStyle};
+        const modelSel = document.getElementById('select-model');
+        const body = {
+            n_new: nNew,
+            difficulty: difficulty,
+            use_past_paper_style: usePastPaperStyle,
+            provider: modelSel?.selectedOptions[0]?.dataset?.provider || '',
+            model: modelSel?.value || '',
+        };
         if (SUBJECT_ID) body.subject_id = parseInt(SUBJECT_ID, 10);
         if (topicIds.length) body.topic_ids = topicIds;
         const res = await fetch('/api/study/start', {
@@ -1239,54 +1402,91 @@ function pollBuild(buildId) {
     tick();
 }
 
-async function resumeSession() {
-    const data = window._resumeData;
-    if (!data) return;
-    sessionId = data.session_id;
-    questions = data.questions;
-    attempts = (data.attempts || []).map(a => ({...a}));
-    questionStates = questions.map(() => 'unanswered');
-    questionResults = {};
-    const answeredPos = new Set();
-    for (const a of attempts) {
-        answeredPos.add(a.position);
-        questionStates[a.position] = (a.user_answer === '[skipped]') ? 'skipped' : 'answered';
-        if (a.user_answer !== '[skipped]') {
-            questionResults[a.position] = {
-                marks_awarded: a.marks_awarded,
-                total_marks: a.total_marks,
-                sm2_grade: a.sm2_grade,
-                feedback: a.feedback,
-                error_tags: a.error_tags || [],
-            };
+async function loadAndResumeSession(sessionId) {
+    try {
+        const res = await fetch(`/api/study/resume?session_id=${sessionId}`);
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Failed to load session');
+        
+        sessionId = data.session_id;
+        questions = data.questions;
+        attempts = (data.attempts || []).map(a => ({...a}));
+        questionStates = questions.map(() => 'unanswered');
+        questionResults = {};
+        const answeredPos = new Set();
+        for (const a of attempts) {
+            answeredPos.add(a.position);
+            questionStates[a.position] = (a.user_answer === '[skipped]') ? 'skipped' : 'answered';
+            if (a.user_answer !== '[skipped]') {
+                questionResults[a.position] = {
+                    marks_awarded: a.marks_awarded,
+                    total_marks: a.total_marks,
+                    sm2_grade: a.sm2_grade,
+                    feedback: a.feedback,
+                    error_tags: a.error_tags || [],
+                };
+            }
         }
-    }
-    currentPos = 0;
-    for (let i = 0; i < questions.length; i++) {
-        if (!answeredPos.has(i)) { currentPos = i; break; }
-        currentPos = i + 1;
-    }
-    document.getElementById('start-screen').style.display = 'none';
-    if (currentPos >= questions.length) {
-        showDoneScreen();
-    } else {
-        document.getElementById('question-screen').style.display = 'block';
-        showQuestion();
+        currentPos = 0;
+        for (let i = 0; i < questions.length; i++) {
+            if (!answeredPos.has(i)) { currentPos = i; break; }
+            currentPos = i + 1;
+        }
+        document.getElementById('start-screen').style.display = 'none';
+        document.getElementById('resume-banner').classList.remove('active');
+        if (currentPos >= questions.length) {
+            showDoneScreen();
+        } else {
+            document.getElementById('question-screen').style.display = 'block';
+            showQuestion();
+        }
+    } catch (e) {
+        toast(e.message, true);
     }
 }
 
-async function discardSession() {
-    const data = window._resumeData;
-    if (!data) return;
+async function resumeSelectedSession() {
+    const sessions = window._resumeSessions;
+    if (!sessions || sessions.length === 0) return;
+    
+    let sessionId;
+    if (sessions.length === 1) {
+        sessionId = sessions[0].session_id;
+    } else {
+        const select = document.getElementById('resume-select');
+        sessionId = parseInt(select.value);
+    }
+    await loadAndResumeSession(sessionId);
+}
+
+async function discardSelectedSession() {
+    const sessions = window._resumeSessions;
+    if (!sessions || sessions.length === 0) return;
+    
+    let sessionId;
+    if (sessions.length === 1) {
+        sessionId = sessions[0].session_id;
+    } else {
+        const select = document.getElementById('resume-select');
+        sessionId = parseInt(select.value);
+    }
+    
     try {
         await fetch('/api/study/discard', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({session_id: data.session_id}),
+            body: JSON.stringify({session_id: sessionId}),
         });
     } catch (e) {}
-    document.getElementById('resume-banner').classList.remove('active');
-    window._resumeData = null;
+    
+    // Remove from list and refresh UI
+    window._resumeSessions = sessions.filter(s => s.session_id !== sessionId);
+    if (window._resumeSessions.length === 0) {
+        document.getElementById('resume-banner').classList.remove('active');
+        window._resumeSessions = null;
+    } else {
+        checkResume(); // Refresh the list
+    }
 }
 
 function showQuestion() {
@@ -1298,6 +1498,16 @@ function showQuestion() {
     document.getElementById('kind-badge').textContent = q.kind;
     document.getElementById('kind-badge').className = 'badge badge-' + q.kind;
     document.getElementById('marks-display').textContent = q.marks + (q.marks === 1 ? ' mark' : ' marks');
+    const paperLink = document.getElementById('paper-link');
+    if (q.kind === 'recall' && q.paper_id) {
+        paperLink.href = `/paper-pdf?question_id=${q.question_id}`;
+        const qnumText = q.qnum ? `Q${q.qnum}` : '';
+        const paperText = q.paper_label || 'paper';
+        paperLink.textContent = qnumText ? `${qnumText} · View in ${paperText}` : `View in ${paperText}`;
+        paperLink.style.display = 'inline-block';
+    } else {
+        paperLink.style.display = 'none';
+    }
     document.getElementById('question-text').innerHTML = markdownToHtml(q.text);
     renderFigure(q.figure, 'question-figure');
 
@@ -1652,6 +1862,30 @@ function nextQuestion() {
     }
 }
 
+/* ----- Export question ----- */
+function exportCurrent() {
+    const q = questions[currentPos];
+    if (!q) return;
+    const payload = {
+        topic: q.topic_code || '',
+        text: q.text,
+        marks: q.marks,
+        markscheme: q.markscheme,
+        figure: q.figure || null,
+        source: q.kind || 'generated',
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `question-${q.question_id || currentPos + 1}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('Question exported', false);
+}
+
 /* ----- Flag (#19) ----- */
 async function flagCurrent() {
     const q = questions[currentPos];
@@ -1810,6 +2044,7 @@ document.addEventListener('keydown', (e) => {
 
 /* On load: check for resumable session and prime stepper button state */
 checkResume();
+loadModelOptions();
 onNNewChange();
 </script>
 </body>

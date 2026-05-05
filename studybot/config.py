@@ -1,4 +1,8 @@
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -7,6 +11,9 @@ DB_PATH = DATA_DIR / "studybot.db"
 MODEL = "claude-sonnet-4-6"
 GRADER_MODEL = "claude-sonnet-4-6"
 VALIDATE_MODEL = "claude-haiku-4-5"
+
+GEN_PROVIDER = os.environ.get("GEN_PROVIDER", "anthropic")
+GEN_MODEL = os.environ.get("GEN_MODEL", "claude-sonnet-4-6")
 
 PAPERS_ROOT = ROOT
 PHYSICS_SPEC = ROOT / "Physics Past Papers" / "171726-specification-accredited-a-level-gce-physics-a-h556.pdf"

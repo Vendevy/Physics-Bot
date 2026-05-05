@@ -18,7 +18,7 @@ TOPIC_SCHEMA = {
                 "properties": {
                     "code": {"type": "string", "description": "Hierarchical code, e.g. '3.1.2'"},
                     "title": {"type": "string"},
-                    "parent_code": {"type": ["string", "null"], "description": "Parent code, or null for top-level"},
+                    "parent_code": {"type": "string", "description": "Parent code, or empty string for top-level"},
                     "depth": {"type": "integer", "description": "0 for top-level module, 1 for subsection, 2 for learning point, etc."},
                     "content": {"type": "string", "description": "Verbatim or condensed learning objectives. Empty for parent-only nodes."},
                 },
@@ -35,7 +35,7 @@ SYSTEM = """You are extracting an A-Level specification into a structured topic 
 Rules:
 - Walk the specification's content section in order.
 - Use the spec's own numbering scheme as the `code` field (e.g. "3.1.2", "1.A", "P1").
-- Set `parent_code` to the immediate parent's code (or null for top-level modules).
+- Set `parent_code` to the immediate parent's code (or empty string for top-level modules).
 - `depth` starts at 0 for top-level modules and increments per nesting level.
 - For leaf learning objectives, copy the objective text into `content`. For parent nodes, leave `content` empty.
 - Be exhaustive: include every leaf learning objective. Do not skip practical / mathematical / data-handling sections.
@@ -58,7 +58,7 @@ def extract(subject_name: str, board: str, spec_pdf: Path) -> int:
         user_text=(
             "Extract ONLY the top-level modules (depth 0) from this specification. "
             "Return their codes and titles only, no sub-topics. "
-            "Set parent_code to null for all of them."
+            "Set parent_code to empty string for all of them."
         ),
         files=[spec_pdf],
         schema=TOPIC_SCHEMA,

@@ -18,19 +18,32 @@ from .config import MODEL
 from .db import connect
 
 load_dotenv()
-_client = anthropic.Anthropic(max_retries=2, timeout=600.0)
+# 120s timeout — if Anthropic hasn't responded by then, something is wrong.
+_client = anthropic.Anthropic(max_retries=2, timeout=120.0)
 
 
 def _call_with_rate_limit_retry(fn, *args, **kwargs):
-    """Call fn(*args, **kwargs), retrying on 429 rate limit errors."""
+    """Call fn(*args, **kwargs), retrying on rate-limit, 5xx, and timeout errors."""
     for attempt in range(6):
         try:
             return fn(*args, **kwargs)
         except anthropic.RateLimitError as e:
             if attempt == 5:
                 raise
-            wait = 60 * (attempt + 1)
+            wait = 15 * (attempt + 1)
             print(f"  Rate limited; waiting {wait}s before retry {attempt + 1}/5...")
+            time.sleep(wait)
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
+            if attempt == 5:
+                raise
+            wait = 10 * (attempt + 1)
+            print(f"  API timeout/connection error; waiting {wait}s before retry {attempt + 1}/5...")
+            time.sleep(wait)
+        except anthropic.APIStatusError as e:
+            if attempt == 5 or e.status_code < 500:
+                raise
+            wait = 10 * (attempt + 1)
+            print(f"  API error {e.status_code}; waiting {wait}s before retry {attempt + 1}/5...")
             time.sleep(wait)
 
 FILES_BETA = "files-api-2025-04-14"
@@ -81,6 +94,9 @@ def call_json(
     max_tokens: int = 16000,
 ) -> Any:
     """Call Claude with structured JSON output. Returns parsed dict/list."""
+    import time
+    print(f"  [DEBUG] Anthropic call_json starting: model={model}")
+    t0 = time.time()
     system_param: list[dict] = [{"type": "text", "text": system}]
     if cache_system:
         system_param[0]["cache_control"] = {"type": "ephemeral"}
@@ -95,8 +111,15 @@ def call_json(
         betas=[FILES_BETA],
     )
 
+    elapsed = time.time() - t0
     text = next(b.text for b in response.content if b.type == "text")
-    return json.loads(text)
+    print(f"  [DEBUG] Anthropic call_json done in {elapsed:.1f}s, output tokens ≈{len(text)//4}")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"  [DEBUG] JSON decode failed: {e}")
+        print(f"  [DEBUG] Raw text (last 200 chars): ...{text[-200:]!r}")
+        raise
 
 
 def stream_text(

@@ -7,10 +7,12 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import config
@@ -957,6 +959,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_study_topics(qs)
         elif path == "/api/papers":
             self._handle_papers(qs)
+        elif path == "/api/model-options":
+            self._handle_model_options()
+        elif path == "/paper-pdf":
+            self._handle_paper_pdf(qs)
         else:
             self.send_error(404)
 
@@ -1032,6 +1038,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 difficulty = 3
             use_past_paper_style = bool(data.get("use_past_paper_style", True))
 
+            provider = data.get("provider", "")
+            gen_model = data.get("model", "") or None
+
+            # Override env vars so build_session picks them up via config
+            if provider:
+                os.environ["GEN_PROVIDER"] = provider
+            if gen_model:
+                os.environ["GEN_MODEL"] = gen_model
+
             build_id = f"b{int(datetime.now().timestamp() * 1000)}"
             with _BUILDS_LOCK:
                 _BUILDS[build_id] = {"events": [], "done": False, "session_id": None, "error": None}
@@ -1049,11 +1064,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         difficulty=difficulty,
                         use_past_paper_style=use_past_paper_style,
                         progress_cb=progress_cb,
+                        gen_model=gen_model,
                     )
                     with _BUILDS_LOCK:
                         _BUILDS[build_id]["session_id"] = sid
                         _BUILDS[build_id]["done"] = True
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     with _BUILDS_LOCK:
                         _BUILDS[build_id]["error"] = str(e)
                         _BUILDS[build_id]["done"] = True
@@ -1088,9 +1106,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             rows = conn.execute(
                 """
                 SELECT sq.position, sq.kind, q.id AS question_id, q.text, q.marks,
-                       q.qnum, q.markscheme, q.figure
+                       q.qnum, q.markscheme, q.figure,
+                       p.id AS paper_id, p.label AS paper_label
                 FROM session_questions sq
                 JOIN questions q ON q.id = sq.question_id
+                LEFT JOIN papers p ON p.id = q.paper_id
                 WHERE sq.session_id = ?
                 ORDER BY sq.position
                 """,
@@ -1106,12 +1126,47 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "kind": r["kind"],
                 "markscheme": r["markscheme"] or "",
                 "figure": json.loads(r["figure"]) if r["figure"] else None,
+                "paper_id": r["paper_id"],
+                "paper_label": r["paper_label"] or "",
             }
             for r in rows
         ]
 
+    def _get_session_resume_data(self, session_id: int) -> dict:
+        """Fetch full resume data for a single session."""
+        questions = self._fetch_session_questions(session_id)
+        with connect() as conn:
+            attempted = conn.execute(
+                """
+                SELECT sq.position, a.marks_awarded, a.total_marks, a.sm2_grade,
+                       a.feedback, a.user_answer, sq.consolidation
+                FROM session_questions sq
+                LEFT JOIN attempts a ON a.id = sq.attempt_id
+                WHERE sq.session_id = ?
+                ORDER BY sq.position
+                """,
+                (session_id,),
+            ).fetchall()
+        attempts = []
+        for r in attempted:
+            if r["marks_awarded"] is not None:
+                attempts.append({
+                    "position": r["position"],
+                    "marks_awarded": r["marks_awarded"],
+                    "total_marks": r["total_marks"],
+                    "sm2_grade": r["sm2_grade"],
+                    "feedback": r["feedback"] or "",
+                    "user_answer": r["user_answer"] or "",
+                    "consolidation": r["consolidation"] or "",
+                })
+        return {
+            "session_id": session_id,
+            "questions": questions,
+            "attempts": attempts,
+        }
+
     def _handle_study_resume(self, qs: dict):
-        """Return the most recent unfinished session for a subject, or null if none."""
+        """Return all unfinished sessions for a subject, or resume a specific one."""
         try:
             requested = qs.get("subject_id", [None])[0]
             if requested is not None:
@@ -1121,53 +1176,47 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     requested = None
             subject_id = self._resolve_subject_id(requested)
             if subject_id is None:
-                self._send_json({"ok": True, "session_id": None})
+                self._send_json({"ok": True, "sessions": []})
                 return
+            
+            # Check if a specific session_id was requested
+            specific_session = qs.get("session_id", [None])[0]
+            if specific_session is not None:
+                try:
+                    specific_session = int(specific_session)
+                    data = self._get_session_resume_data(specific_session)
+                    self._send_json({"ok": True, **data})
+                    return
+                except ValueError:
+                    pass
+            
             with connect() as conn:
-                row = conn.execute(
+                rows = conn.execute(
                     """
-                    SELECT id FROM sessions
-                    WHERE subject_id = ? AND completed_at IS NULL
-                    ORDER BY started_at DESC LIMIT 1
+                    SELECT s.id, s.started_at, s.mode,
+                           (SELECT COUNT(*) FROM session_questions WHERE session_id = s.id) AS total,
+                           (SELECT COUNT(*) FROM session_questions 
+                            WHERE session_id = s.id AND attempt_id IS NOT NULL) AS done
+                    FROM sessions s
+                    WHERE s.subject_id = ? AND s.completed_at IS NULL
+                    ORDER BY s.started_at DESC
                     """,
                     (subject_id,),
-                ).fetchone()
-            if not row:
-                self._send_json({"ok": True, "session_id": None})
-                return
-            session_id = row["id"]
-            questions = self._fetch_session_questions(session_id)
-            # Determine which positions already have an attempt
-            with connect() as conn:
-                attempted = conn.execute(
-                    """
-                    SELECT sq.position, a.marks_awarded, a.total_marks, a.sm2_grade,
-                           a.feedback, a.user_answer, sq.consolidation
-                    FROM session_questions sq
-                    LEFT JOIN attempts a ON a.id = sq.attempt_id
-                    WHERE sq.session_id = ?
-                    ORDER BY sq.position
-                    """,
-                    (session_id,),
                 ).fetchall()
-            attempts = []
-            for r in attempted:
-                if r["marks_awarded"] is not None:
-                    attempts.append({
-                        "position": r["position"],
-                        "marks_awarded": r["marks_awarded"],
-                        "total_marks": r["total_marks"],
-                        "sm2_grade": r["sm2_grade"],
-                        "feedback": r["feedback"] or "",
-                        "user_answer": r["user_answer"] or "",
-                        "consolidation": r["consolidation"] or "",
-                    })
-            self._send_json({
-                "ok": True,
-                "session_id": session_id,
-                "questions": questions,
-                "attempts": attempts,
-            })
+            
+            sessions = []
+            for r in rows:
+                if r["total"] == 0:
+                    continue
+                sessions.append({
+                    "session_id": r["id"],
+                    "started_at": r["started_at"],
+                    "mode": r["mode"],
+                    "total": r["total"],
+                    "done": r["done"],
+                })
+            
+            self._send_json({"ok": True, "sessions": sessions})
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
 
@@ -1328,6 +1377,54 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "papers": papers})
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_model_options(self):
+        try:
+            self._send_json({
+                "ok": True,
+                "current_provider": config.GEN_PROVIDER,
+                "current_model": config.GEN_MODEL,
+                "providers": [
+                    {"id": "anthropic", "label": "Claude Sonnet 4.6", "model": "claude-sonnet-4-6"},
+                    {"id": "anthropic", "label": "Claude Haiku 4.5", "model": "claude-haiku-4-5"},
+                ],
+            })
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_paper_pdf(self, qs: dict):
+        """Serve the original question-paper PDF for a given question."""
+        try:
+            qid = qs.get("question_id", [None])[0]
+            if qid is None:
+                self.send_error(400, "Missing question_id")
+                return
+            try:
+                qid = int(qid)
+            except (TypeError, ValueError):
+                self.send_error(400, "Invalid question_id")
+                return
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT p.qp_path FROM questions q JOIN papers p ON p.id = q.paper_id WHERE q.id = ?",
+                    (qid,),
+                ).fetchone()
+            if not row or not row["qp_path"]:
+                self.send_error(404, "PDF not found")
+                return
+            path = Path(row["qp_path"])
+            if not path.exists():
+                self.send_error(404, "PDF file missing")
+                return
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'inline; filename="{path.name}"')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self.send_error(500, str(e))
 
     def _handle_mock_start(self):
         try:

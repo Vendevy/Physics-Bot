@@ -14,6 +14,7 @@ python -m studybot init
 **API keys** (set in `.env`):
 - **Anthropic** — `ANTHROPIC_API_KEY` — generates new practice questions and grades your answers.
 - **Gemini** (optional) — `GEMINI_API_KEY` — used for cheap PDF extraction of the spec and past-paper question banks. https://aistudio.google.com/app/apikey
+- **DeepSeek** (optional) — `DEEPSEEK_API_KEY` — alternative generation provider; set `GEN_PROVIDER=deepseek` to use.
 
 ## Bring your own past papers
 
@@ -88,14 +89,17 @@ Two modes selectable on the start screen:
   3. **5 — Very Difficult A-Level** — combine two moves; at least one must be qualitative or evaluative
   4. **6 — Extremely Difficult A-Level** — combine two or three moves; subtle traps, BPhO-stretch, strictly within the spec
   At L4+, the prompt injects a menu of named conceptual moves the model picks from — synthesis across spec points, limiting-case reasoning, qualitative-before-quantitative, misconception traps, method evaluation, symbolic derivation before substitution, unfamiliar context with familiar physics, and estimation with justification. Hardness comes from depth of thinking, not from importing harder maths.
+- **Model selector** — switch between Claude Sonnet 4.6 and Claude Haiku 4.5 (faster, cheaper) before starting.
 - **Past-paper style anchor** — checkbox (default on). When on, one short past-paper question on the same topic is injected as a style reference (form only — the model is told to pick a fresh scenario). Turn off to generate purely from the spec content with no past-paper anchoring.
 - **Anti-repetition** — every generation gets a "do not repeat" list of the last 8 generated scenarios on the same topic, with a short kebab-case `scenario` tag (e.g. `skydiver-terminal-velocity`) stored on each question for cheap deduping.
 - **Topic picker** — collapsible search-and-tick of leaf topics. Pick up to N (= chosen question count) specific topics, or leave empty to auto-pick the weakest.
 - **Live build progress** — questions generated in parallel; the UI streams "3/7 — 4.2.1 Stationary waves" as each one finishes.
 - **Streaming grader** — feedback streams token-by-token via SSE.
 - **Charts (Chart.js)** — when a question genuinely needs a graph (e.g. v–t analysis, IV characteristics, decay curve), the model emits structured data and the chart is rendered inline beside the question.
+- **SVG diagrams** — for circuit diagrams, free-body diagrams, ray diagrams, and experimental setups, the model generates inline SVG rendered on a dark background.
+- **Export question** — download any question (text, markscheme, figure data) as JSON for offline use.
 - **Autosave** — every keystroke is saved to `localStorage`.
-- **Resume / discard** — close the tab and a banner offers Resume or Discard.
+- **Resume / discard** — close the tab and a banner lists all unfinished sessions; pick which one to resume or discard.
 - **Skip** — skip any question without grading (no API cost). Recorded as 0 marks. Keyboard shortcut: Escape.
 - **Flag** — per-question button to mark broken / OCR-mangled / disputed questions.
 - **Time tracking** — wall-clock per question is logged on every attempt.
@@ -106,6 +110,9 @@ Two modes selectable on the start screen:
 - Sit the paper end-to-end with a sticky **count-up timer**. **No mid-session feedback** — submission saves the answer and advances to the next question.
 - "Finish & Submit Paper" on the last question batch-grades every answer in parallel and shows total awarded / possible.
 - Review & Consolidate works the same as daily mode.
+
+#### Recall questions & past-paper figures
+- **Recall questions** are past-paper questions due for spaced review (SM-2). If a question references a figure (e.g. "shown in Fig. 2.2"), a **"View in Paper"** link appears — it opens the original past-paper PDF in a new tab so you can look up the diagram.
 
 #### Other UX
 - **Subject lock** — generated questions are explicitly framed in the active subject; even subject-agnostic topic titles ("Evaluation of experimental method", "Significant figures") get physics scenarios in physics sessions.
