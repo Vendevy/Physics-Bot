@@ -1,9 +1,15 @@
 .env
 data/*.db
 data/*.db-journal
+data/*.db.bak
 __pycache__/
 *.pyc
 .venv/
+
+# Generated data artifacts (derived from copyrighted past-paper material)
+export/
+questions_repaired.csv
+fix_paper3_markschemes.py
 
 # Past-paper PDFs are copyrighted exam-board material. Bring your own.
 Physics Past Papers/

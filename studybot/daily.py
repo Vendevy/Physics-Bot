@@ -2,14 +2,57 @@
 from __future__ import annotations
 
 import json
+import os
+import random
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable
+from typing import Any, Callable
 
 from . import llm
 from . import llm_openai
-from .config import DAILY_NEW, DAILY_RECALL, GEN_PROVIDER, GEN_MODEL, VALIDATE_MODEL
+from . import llm_claude_cli
+from .config import (
+    DAILY_NEW, DAILY_RECALL, GEN_PROVIDER, GEN_MODEL, VALIDATE_MODEL,
+    ERROR_BOOST_WINDOW_DAYS, ERROR_BOOST_GRADE_MAX, ERROR_BOOST_PER_ERROR, ERROR_BOOST_CAP,
+)
 from .db import connect
 from .srs import today_iso
+
+# Lean version for CLI provider: strips verbose field descriptions to save tokens.
+# The system prompt already explains the format; descriptions are redundant overhead.
+GEN_SCHEMA_LEAN = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "text": {"type": "string"},
+        "marks": {"type": "integer"},
+        "markscheme": {"type": "string"},
+        "scenario": {"type": "string"},
+        "figure": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "type": {"type": "string", "enum": ["line", "scatter", "bar", "svg"]},
+                "title": {"type": "string"},
+                "xlabel": {"type": "string"},
+                "ylabel": {"type": "string"},
+                "x": {"type": "array", "items": {"type": "number"}},
+                "series": {
+                    "type": "array", "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {"name": {"type": "string"}, "y": {"type": "array", "items": {"type": "number"}}},
+                        "required": ["name", "y"],
+                    },
+                },
+                "svg": {"type": "string"},
+            },
+            "required": ["type", "title"],
+        },
+    },
+    "required": ["text", "marks", "markscheme", "scenario"],
+}
 
 GEN_SCHEMA = {
     "type": "object",
@@ -72,11 +115,12 @@ VALIDATE_SYSTEM = """You are an A-Level examiner verifying a practice question f
 
 Check the following:
 1. SOLVABILITY — Can the question be answered using ONLY the information given and knowledge from the specification? No missing values, no unstated assumptions.
-2. CONSISTENCY — Are all given values self-consistent? (e.g. if V=12 V and R=4 Ω are both given, I must equal 3 A by Ohm's law; if they conflict, flag it.)
-3. MARKSCHEME ACCURACY — Does the markscheme correctly solve the question as stated? Do the marking points (M1, A1, B1) add up to the total marks? Does the final answer match the given values?
-4. COMPLETENESS — Are all sub-parts of the question addressed in the markscheme?
-5. FIGURES — If a figure is provided, does the question text reference it and are the data realistic? For SVG diagrams, are the physics and conventions correct (correct circuit symbols, ray directions, force vectors, etc.)?
-6. LATEX FORMATTING — Are all mathematical expressions, equations, and symbols in the markscheme wrapped in $...$ LaTeX? There should be no bare Unicode math symbols (like ², ⁻¹, ×, →) outside of LaTeX delimiters.
+2. TOPIC MATCH — Does the question actually exercise the spec content for the tagged topic code? If the question is solvable but tests a different topic, flag this in `issues` with the prefix 'topic-mistag:' so the caller can distinguish it from mathematical errors.
+3. CONSISTENCY — Are all given values self-consistent? (e.g. if V=12 V and R=4 Ω are both given, I must equal 3 A by Ohm's law; if they conflict, flag it.)
+4. MARKSCHEME ACCURACY — Does the markscheme correctly solve the question as stated? Do the marking points (M1, A1, B1) add up to the total marks? Does the final answer match the given values?
+5. COMPLETENESS — Are all sub-parts of the question addressed in the markscheme?
+6. FIGURES — If a figure is provided, does the question text reference it and are the data realistic? For SVG diagrams, are the physics and conventions correct (correct circuit symbols, ray directions, force vectors, etc.)?
+7. LATEX FORMATTING — Are all mathematical expressions, equations, and symbols in the markscheme wrapped in $...$ LaTeX? There should be no bare Unicode math symbols (like ², ⁻¹, ×, →) outside of LaTeX delimiters.
 
 Be lenient — only flag genuine errors that would prevent a student from answering correctly or make the markscheme wrong. Minor phrasing issues or alternative valid wordings are acceptable."""
 
@@ -130,7 +174,10 @@ Spec-bound: each chosen move must operate on the spec content given in the user 
 
 
 def _gen_system(subject_name: str, board: str, difficulty: int = 3) -> str:
+    # NOTE: substring match is intentional; revisit if subjects like "Biophysics"
+    # or "Mathematical Biology" are ever added.
     is_physics = "physics" in subject_name.lower()
+    is_maths = "mathematics" in subject_name.lower()
     diff = difficulty if difficulty in DIFFICULTY_BLURBS else 3
     diff_blurb = DIFFICULTY_BLURBS[diff]
 
@@ -142,6 +189,31 @@ def _gen_system(subject_name: str, board: str, difficulty: int = 3) -> str:
             "equations in the question OR the markscheme. Express rates of change using "
             "gradients of graphs, ratios (Δv/Δt), or algebraic manipulation. 'Area under "
             "a graph' is fine; integral notation is not."
+        )
+    if is_maths:
+        spec_rules.append(
+            "The Edexcel Mathematical Formulae and Statistical Tables booklet is available "
+            "in the exam. Do NOT ask students to derive or quote formulae that appear in "
+            "the booklet as if they were unknown; treat them as available. The booklet "
+            "covers: standard derivatives and integrals beyond x^n / sin / cos / e^x / "
+            "ln x, the binomial series for rational n, sum formulae for arithmetic and "
+            "geometric series, the trapezium rule, vector formulae, and the statistical "
+            "distributions and tests. Core results that are NOT in the booklet (e.g. "
+            "derivatives of x^n, sin x, cos x, e^x, ln x; integration by parts formula "
+            "derivation; basic trig identities like sin²θ + cos²θ = 1) may legitimately "
+            "be required to be recalled or proved."
+        )
+        spec_rules.append(
+            "Exact-form answers are preferred where applicable. Accept and expect answers "
+            "in surd form (e.g. 3√2), in terms of π, e, ln 2, etc., rather than decimal "
+            "approximations, unless the question explicitly asks for a numerical value to "
+            "a stated accuracy."
+        )
+        spec_rules.append(
+            "Notation must be standard A-Level: use f'(x) and f''(x) or dy/dx and "
+            "d²y/dx² for derivatives; ∫ ... dx for integrals; use proper limits on "
+            "definite integrals; vectors in bold or with the i, j, k convention; column "
+            "vectors where appropriate."
         )
     spec_rules.append(
         f"Stay strictly within the {board} {subject_name} specification. Do not "
@@ -158,6 +230,21 @@ def _gen_system(subject_name: str, board: str, difficulty: int = 3) -> str:
     moves_block = ""
     if diff >= 4:
         moves_block = "\n\n" + CONCEPTUAL_MOVES.format(board=board, subject_name=subject_name)
+
+    if is_physics:
+        svg_examples = (
+            "a circuit diagram, free-body diagram, ray diagram (lenses/mirrors), "
+            "force/moment diagram, experimental setup schematic, or any geometry-dependent scenario"
+        )
+    elif is_maths:
+        svg_examples = (
+            "graphs of functions y = f(x), labelled geometric figures "
+            "(triangles, circles, polygons with vertices and angles labelled), "
+            "coordinate axes with marked points, vector diagrams, or sketch axes "
+            "for parametric curves"
+        )
+    else:
+        svg_examples = "a diagram or geometry-dependent scenario relevant to the subject"
 
     return f"""You are an examiner for {subject_name} ({board}) generating a fresh practice question on a specific topic from the official specification.
 
@@ -188,7 +275,7 @@ Figures:
 - Omit the `figure` field when no visual aid is needed.
 - Only provide a `figure` when the question genuinely benefits from one:
   * Graph (type: line/scatter/bar) — when the student must read values or trends from a graph.
-  * SVG diagram (type: svg) — when the question involves a circuit diagram, free-body diagram, ray diagram (lenses/mirrors), force/moment diagram, experimental setup schematic, or any geometry-dependent scenario. The question text must reference the diagram (e.g. "In the circuit shown below...", "The diagram below shows...").
+  * SVG diagram (type: svg) — when the question involves {svg_examples}. The question text must reference the diagram explicitly (e.g. "In the diagram shown below...", "The diagram below shows...").
 - Never include a `figure` for questions that ask the student to plot, sketch, or draw something themselves.
 - For SVG diagrams: generate clean, accurate diagrams following standard physics conventions. Circuits use standard symbols. Force diagrams use arrow vectors. Ray diagrams show lenses/mirrors with principal axis, focal points, and ray paths. Use light-coloured strokes (white, light grey) so the diagram is clearly visible on a dark background — never use black or dark grey.
 """
@@ -196,24 +283,33 @@ Figures:
 
 MAX_VALIDATE_RETRIES = 2
 
+_PLOT_SKETCH_RE = re.compile(
+    r"\b(sketch|plot|draw|on\s+the\s+axes\s+below|on\s+the\s+grid)\b",
+    re.IGNORECASE,
+)
+
 
 def pick_weakest_topics(subject_id: int, n: int) -> list[dict]:
     """n leaf topics with content, ordered by lowest (mastery - error_boost),
     so topics with recent repeated errors are prioritised over their mastery alone."""
     with connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT t.id, t.code, t.title, t.content, m.score, m.last_reviewed,
                    COALESCE(ep.error_boost, 0.0) AS error_boost
             FROM topics t
             JOIN mastery m ON m.topic_id = t.id
             LEFT JOIN (
                 SELECT qt.topic_id,
-                       MIN(0.3, COUNT(*) * 0.1) AS error_boost
+                       CASE
+                           WHEN COUNT(*) * {ERROR_BOOST_PER_ERROR} < {ERROR_BOOST_CAP}
+                           THEN COUNT(*) * {ERROR_BOOST_PER_ERROR}
+                           ELSE {ERROR_BOOST_CAP}
+                       END AS error_boost
                 FROM attempts a
                 JOIN question_topics qt ON qt.question_id = a.question_id
-                WHERE a.answered_at >= date('now', '-14 days')
-                  AND a.sm2_grade <= 2
+                WHERE a.answered_at >= date('now', '-{ERROR_BOOST_WINDOW_DAYS} days')
+                  AND a.sm2_grade <= {ERROR_BOOST_GRADE_MAX}
                 GROUP BY qt.topic_id
             ) ep ON ep.topic_id = t.id
             WHERE t.subject_id = ? AND COALESCE(t.content, '') != ''
@@ -224,6 +320,23 @@ def pick_weakest_topics(subject_id: int, n: int) -> list[dict]:
             (subject_id, n),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def pick_random_topics(subject_id: int, n: int) -> list[dict]:
+    """n leaf topics with content, chosen uniformly at random."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT t.id, t.code, t.title, t.content,
+                   COALESCE(m.score, 0.0) AS score, m.last_reviewed
+            FROM topics t
+            LEFT JOIN mastery m ON m.topic_id = t.id
+            WHERE t.subject_id = ? AND COALESCE(t.content, '') != ''
+            """,
+            (subject_id,),
+        ).fetchall()
+    all_topics = [dict(r) for r in rows]
+    return random.sample(all_topics, min(n, len(all_topics)))
 
 
 def pick_topics_by_id(subject_id: int, topic_ids: list[int]) -> list[dict]:
@@ -335,6 +448,31 @@ def _style_exemplar_for_topic(topic_id: int) -> str | None:
         return row["snippet"] if row else None
 
 
+def _other_past_paper_snippets(topic_id: int, exemplar_prefix: str | None, n: int = 3) -> list[str]:
+    """Short snippets of other past-paper questions on this topic (excluding the style exemplar)."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT substr(q.text, 1, 120) AS snippet
+            FROM questions q
+            JOIN question_topics qt ON qt.question_id = q.id
+            WHERE qt.topic_id = ? AND q.source = 'past_paper'
+            ORDER BY RANDOM() LIMIT ?
+            """,
+            (topic_id, n + 1),
+        ).fetchall()
+    results: list[str] = []
+    excl = exemplar_prefix[:120] if exemplar_prefix else None
+    for r in rows:
+        s = r["snippet"]
+        if excl and s == excl:
+            continue
+        results.append(s)
+        if len(results) >= n:
+            break
+    return results
+
+
 def _llm_json(
     *,
     system: str,
@@ -343,9 +481,15 @@ def _llm_json(
     model: str,
     max_tokens: int = 16000,
 ) -> Any:
-    print(f"  [DEBUG] _llm_json: provider={GEN_PROVIDER}, model={model}")
-    if GEN_PROVIDER == "deepseek":
+    provider = os.environ.get("GEN_PROVIDER", GEN_PROVIDER)
+    print(f"  [DEBUG] _llm_json: provider={provider}, model={model}")
+    if provider == "deepseek":
         return llm_openai.call_json_openai(
+            system=system, user_text=user_text, schema=schema,
+            model=model, max_tokens=max_tokens,
+        )
+    elif provider == "claude-cli":
+        return llm_claude_cli.call_json(
             system=system, user_text=user_text, schema=schema,
             model=model, max_tokens=max_tokens,
         )
@@ -360,13 +504,14 @@ def _llm_json(
         )
 
 
-def _validate_question(q: dict, subject_name: str, board: str, topic_content: str) -> dict:
+def _validate_question(q: dict, subject_name: str, board: str, topic_content: str,
+                       topic_code: str = "", topic_title: str = "") -> dict:
     """Validate a generated question for solvability, consistency, and markscheme accuracy.
     Returns dict with keys: 'pass' (bool), 'issues' (str), 'corrected' (str|None)."""
     print(f"[DEBUG] _validate_question: marks={q.get('marks', '?')} model={VALIDATE_MODEL}")
     parts = [
         f"Subject: {subject_name} ({board})",
-        f"Topic spec: {topic_content}",
+        f"Topic tag: {topic_code} — {topic_title}\nTopic spec: {topic_content}",
         f"Question ({q.get('marks', '?')} marks):\n{q.get('text', '')}",
         f"Markscheme:\n{q.get('markscheme', '')}",
     ]
@@ -377,14 +522,24 @@ def _validate_question(q: dict, subject_name: str, board: str, topic_content: st
     max_tokens = 2000
     for attempt in range(3):
         try:
-            result = llm.call_json(
-                system=VALIDATE_SYSTEM,
-                user_blocks=[llm.text_block(user_text)],
-                schema=VALIDATE_SCHEMA,
-                cache_system=False,
-                model=VALIDATE_MODEL,
-                max_tokens=max_tokens,
-            )
+            _cur_provider = os.environ.get("GEN_PROVIDER", GEN_PROVIDER)
+            if _cur_provider == "claude-cli":
+                result = llm_claude_cli.call_json(
+                    system=VALIDATE_SYSTEM,
+                    user_text=user_text,
+                    schema=VALIDATE_SCHEMA,
+                    model=VALIDATE_MODEL,
+                    max_tokens=max_tokens,
+                )
+            else:
+                result = llm.call_json(
+                    system=VALIDATE_SYSTEM,
+                    user_blocks=[llm.text_block(user_text)],
+                    schema=VALIDATE_SCHEMA,
+                    cache_system=False,
+                    model=VALIDATE_MODEL,
+                    max_tokens=max_tokens,
+                )
             break
         except Exception as e:
             if attempt < 2:
@@ -419,10 +574,16 @@ def generate_question(
     score = topic.get("score", 0.0) or 0.0
     diff_label = DIFFICULTY_LABELS.get(difficulty, DIFFICULTY_LABELS[3])
 
+    _provider = os.environ.get("GEN_PROVIDER", GEN_PROVIDER)
+    # For CLI provider, truncate spec content to keep prompt lean.
+    spec_content = topic["content"]
+    if _provider == "claude-cli" and len(spec_content) > 600:
+        spec_content = spec_content[:600] + "…"
+
     parts = [
         f"Subject: {subject_name} ({board})",
         f"Topic: {topic['code']} — {topic['title']}",
-        f"Spec content: {topic['content']}",
+        f"Spec content: {spec_content}",
         f"Student's current mastery on this topic: {score:.2f}",
         f"Required difficulty level: {diff_label} (level {difficulty}).",
     ]
@@ -458,6 +619,16 @@ def generate_question(
             f"  {exemplar_clean}"
         )
 
+    if topic.get("id") is not None:
+        others = _other_past_paper_snippets(topic["id"], exemplar, n=3)
+        if others:
+            bullets = [f"- {s.replace(chr(10), ' ').strip()}" for s in others]
+            parts.append(
+                "For reference, students have also seen these past-paper questions on "
+                "this topic — do NOT reuse their specific numerical values, named "
+                "objects, or sub-part structure:\n" + "\n".join(bullets)
+            )
+
     parts.append(
         f"Generate one {subject_name} practice question on this topic at the required "
         f"difficulty level. Remember: the question must be a {subject_name} question, "
@@ -465,10 +636,12 @@ def generate_question(
     )
     user_text = "\n\n".join(parts)
 
+    _provider = os.environ.get("GEN_PROVIDER", GEN_PROVIDER)
+    _schema = GEN_SCHEMA_LEAN if _provider == "claude-cli" else GEN_SCHEMA
     return _llm_json(
         system=_gen_system(subject_name, board, difficulty),
         user_text=user_text,
-        schema=GEN_SCHEMA,
+        schema=_schema,
         model=model or GEN_MODEL,
         max_tokens=6000,
     )
@@ -478,6 +651,7 @@ def build_session(
     subject_id: int,
     *,
     topic_ids: list[int] | None = None,
+    topic_mode: str = "weakest",
     n_new: int | None = None,
     difficulty: int = 3,
     use_past_paper_style: bool = True,
@@ -490,7 +664,8 @@ def build_session(
     Generated questions are persisted into the questions table with source='generated'.
 
     If `topic_ids` is given, generate one question per topic (in that order, capped
-    at `n_new`). Otherwise fall back to the user's current weakest topics.
+    at `n_new`). Otherwise `topic_mode` controls auto-selection: 'weakest' (default)
+    or 'random'.
 
     `n_new` overrides DAILY_NEW for this session; clamped to [1, 15].
     `difficulty` is 3..6 (Standard, Difficult, Very Difficult, Extremely Difficult).
@@ -503,7 +678,8 @@ def build_session(
     so callers (e.g. the web UI) can stream status to the user.
     """
     gen_model = gen_model or GEN_MODEL
-    print(f"[DEBUG] build_session start: subject_id={subject_id}, n_new={n_new}, difficulty={difficulty}, model={gen_model}, validate={validate}")
+    provider = os.environ.get("GEN_PROVIDER", GEN_PROVIDER)
+    print(f"[DEBUG] build_session start: subject_id={subject_id}, n_new={n_new}, difficulty={difficulty}, model={gen_model}, validate={validate}, provider={provider}")
     with connect() as conn:
         subject = conn.execute(
             "SELECT name, board FROM subjects WHERE id = ?", (subject_id,)
@@ -518,6 +694,8 @@ def build_session(
 
     if topic_ids:
         weak = pick_topics_by_id(subject_id, topic_ids)[:n_new_eff]
+    elif topic_mode == "random":
+        weak = pick_random_topics(subject_id, n_new_eff)
     else:
         weak = pick_weakest_topics(subject_id, n_new_eff)
     recall = pick_due_for_recall(subject_id, DAILY_RECALL)
@@ -528,21 +706,49 @@ def build_session(
         )
 
     def _generate_one(topic: dict) -> dict:
-        q = generate_question(
-            topic,
-            subject_name=subject_name,
-            board=board,
-            difficulty=difficulty,
-            use_past_paper_style=use_past_paper_style,
-            model=gen_model,
-        )
+        def _gen_with_required_fields() -> dict:
+            # Guard against generator returning a dict missing required fields
+            # (would crash the INSERT downstream). Regenerate if so.
+            for gen_attempt in range(MAX_VALIDATE_RETRIES + 1):
+                qg = generate_question(
+                    topic,
+                    subject_name=subject_name,
+                    board=board,
+                    difficulty=difficulty,
+                    use_past_paper_style=use_past_paper_style,
+                    model=gen_model,
+                )
+                missing = [k for k in ("text", "marks", "markscheme") if k not in qg]
+                if not missing:
+                    return qg
+                print(
+                    f"  [DEBUG] generated question missing {missing}"
+                    f" (attempt {gen_attempt + 1}); regenerating"
+                )
+            # Last-resort fallback so the session can still be built.
+            qg.setdefault("text", "")
+            qg.setdefault("marks", 1)
+            qg.setdefault("markscheme", "")
+            return qg
+
+        q = _gen_with_required_fields()
+        if q.get("figure") is not None and _PLOT_SKETCH_RE.search(q.get("text", "")):
+            fig = q["figure"]
+            is_data_chart = (
+                fig.get("type") in ("line", "scatter", "bar") and bool(fig.get("series"))
+            )
+            if not is_data_chart:
+                print(f"[DEBUG] Dropped figure on plot/sketch question (topic={topic.get('code', '?')})")
+                q["figure"] = None
         if not validate:
             return q
         for attempt in range(MAX_VALIDATE_RETRIES + 1):
-            v = _validate_question(q, subject_name, board, topic.get("content", ""))
+            v = _validate_question(q, subject_name, board, topic.get("content", ""),
+                                   topic.get("code", ""), topic.get("title", ""))
             if v["pass"]:
                 return q
-            if v["corrected"]:
+            is_mistag = v["issues"].startswith("topic-mistag:")
+            if v["corrected"] and not is_mistag:
                 q["markscheme"] = v["corrected"]
                 return q
             if attempt < MAX_VALIDATE_RETRIES:
@@ -559,7 +765,8 @@ def build_session(
                 print(f"    Using unvalidated question after {MAX_VALIDATE_RETRIES + 1} attempts")
         return q
 
-    print(f"Generating {len(weak)} new questions on weakest topics...")
+    _mode_label = "random topics" if (not topic_ids and topic_mode == "random") else "weakest topics" if not topic_ids else "selected topics"
+    print(f"Generating {len(weak)} new questions on {_mode_label}...")
     total = len(weak)
     generated_map: dict[int, tuple[dict, dict]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:

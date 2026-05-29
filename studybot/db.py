@@ -11,6 +11,11 @@ CREATE TABLE IF NOT EXISTS subjects (
     spec_file_id TEXT
 );
 
+-- OFF-LIMITS: do NOT ingest entries from the spec's "Mathematical Notation"
+-- appendix (Appendix 2 / section titled "Notation") into this table.
+-- Those appendix entries share the same N.M numbering as real topic codes
+-- and caused 110 symbol definitions (Σ, nCr, ℕ, dy/dx, …) to appear as
+-- selectable topics. Only ingest content from the numbered topic sections.
 CREATE TABLE IF NOT EXISTS topics (
     id INTEGER PRIMARY KEY,
     subject_id INTEGER NOT NULL REFERENCES subjects(id),

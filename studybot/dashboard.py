@@ -1025,6 +1025,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 except (TypeError, ValueError):
                     pass
             topic_ids = topic_ids or None
+            topic_mode = data.get("topic_mode", "weakest")
+            if topic_mode not in ("weakest", "random"):
+                topic_mode = "weakest"
 
             try:
                 n_new = int(data.get("n_new")) if data.get("n_new") is not None else None
@@ -1060,6 +1063,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     sid = build_session(
                         subject_id,
                         topic_ids=topic_ids,
+                        topic_mode=topic_mode,
                         n_new=n_new,
                         difficulty=difficulty,
                         use_past_paper_style=use_past_paper_style,
@@ -1387,6 +1391,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "providers": [
                     {"id": "anthropic", "label": "Claude Sonnet 4.6", "model": "claude-sonnet-4-6"},
                     {"id": "anthropic", "label": "Claude Haiku 4.5", "model": "claude-haiku-4-5"},
+                    {"id": "claude-cli", "label": "Claude CLI — Sonnet 4.6", "model": "claude-sonnet-4-6"},
+                    {"id": "claude-cli", "label": "Claude CLI — Opus 4.7", "model": "claude-opus-4-7"},
                 ],
             })
         except Exception as e:
@@ -1622,6 +1628,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             )
             emit({"type": "final", **final_result})
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             try:
                 emit({"type": "error", "message": str(e)})
             except Exception:

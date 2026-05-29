@@ -374,6 +374,9 @@ body {
     font-variant-numeric:tabular-nums;
 }
 .topic-picker-counter.active { color:#818cf8; }
+.topic-mode-btn { font-size:11px; padding:2px 7px; height:auto; color:#a1a1aa; border:1px solid rgba(255,255,255,0.08); }
+.topic-mode-btn:hover { color:#e4e4e7; }
+.topic-mode-btn.active { color:#818cf8; border-color:rgba(129,140,248,0.4); }
 .topic-picker-chevron {
     width:12px; height:12px; color:#52525b;
     transition:transform 0.2s;
@@ -606,7 +609,10 @@ body {
                         <svg class="topic-picker-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
                         <span class="topic-picker-title">Choose specific topics (optional)</span>
                     </div>
-                    <span class="topic-picker-counter" id="topic-picker-counter">Auto: weakest topics</span>
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <button class="btn btn-ghost topic-mode-btn" id="topic-mode-btn" onclick="toggleTopicMode(event)" title="Switch between weakest/random auto-selection">Auto: weakest</button>
+                        <span class="topic-picker-counter" id="topic-picker-counter"></span>
+                    </div>
                 </div>
                 <div class="topic-picker-body">
                     <div class="topic-search-row">
@@ -616,7 +622,7 @@ body {
                         <div class="topic-list-empty">Loading topics...</div>
                     </div>
                     <div class="topic-picker-actions">
-                        <span class="topic-hint" id="topic-hint">Pick up to {{DAILY_NEW}} topics. Leave empty to auto-pick weakest.</span>
+                        <span class="topic-hint" id="topic-hint">Pick up to {{DAILY_NEW}} topics. Leave empty to auto-pick.</span>
                         <button class="btn btn-ghost" onclick="clearTopicSelection()">Clear</button>
                     </div>
                 </div>
@@ -634,9 +640,7 @@ body {
         <div class="section-label" id="progress-label">Question 1 / 10</div>
         <div class="progress-track"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
         <div class="question-nav" id="question-nav" style="display:none;">
-            <button class="btn btn-ghost nav-btn" id="btn-prev" onclick="navigateQuestion(-1)" disabled>&larr; Prev</button>
             <div class="question-dots" id="question-dots"></div>
-            <button class="btn btn-ghost nav-btn" id="btn-nav-next" onclick="navigateQuestion(1)">Next &rarr;</button>
         </div>
 
         <div class="card">
@@ -665,7 +669,7 @@ body {
             <div class="question-text" id="question-text">Loading...</div>
             <div id="answer-section">
                 <textarea class="answer-area" id="answer-input" placeholder="Type your answer here..." oninput="autosaveAnswer()"></textarea>
-                <div class="kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to submit &middot; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to navigate</div>
+                <div class="kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to submit</div>
                 <div id="question-actions" style="margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
                     <button class="btn btn-ghost" id="btn-skip" onclick="skipQuestion()" style="color:#9aa0a8;border:1px solid #3a3f47;">Skip</button>
                     <button class="btn btn-primary" id="btn-submit" onclick="submitAnswer()">
@@ -1137,7 +1141,7 @@ async function loadModelOptions() {
         if (!data.ok) return;
         const sel = document.getElementById('select-model');
         sel.innerHTML = data.providers.map(p => {
-            const selected = p.id === data.current_provider ? ' selected' : '';
+            const selected = (p.id === data.current_provider && p.model === data.current_model) ? ' selected' : '';
             return `<option value="${p.model}" data-provider="${p.id}"${selected}>${p.label}</option>`;
         }).join('');
     } catch (e) { /* silent — keep empty dropdown */ }
@@ -1249,11 +1253,22 @@ function clearTopicSelection() {
     renderTopicList();
 }
 
+let topicMode = 'weakest'; // 'weakest' | 'random'
+
+function toggleTopicMode(e) {
+    e.stopPropagation();
+    topicMode = topicMode === 'weakest' ? 'random' : 'weakest';
+    const btn = document.getElementById('topic-mode-btn');
+    btn.textContent = topicMode === 'weakest' ? 'Auto: weakest' : 'Auto: random';
+    btn.classList.toggle('active', topicMode === 'random');
+    updateTopicCounter();
+}
+
 function updateTopicCounter() {
     const el = document.getElementById('topic-picker-counter');
     const n = selectedTopicIds.size;
     if (n === 0) {
-        el.textContent = 'Auto: weakest topics';
+        el.textContent = '';
         el.classList.remove('active');
     } else {
         el.textContent = `${n} / ${getNNew()} selected`;
@@ -1311,6 +1326,7 @@ async function startSession() {
             use_past_paper_style: usePastPaperStyle,
             provider: modelSel?.selectedOptions[0]?.dataset?.provider || '',
             model: modelSel?.value || '',
+            topic_mode: topicMode,
         };
         if (SUBJECT_ID) body.subject_id = parseInt(SUBJECT_ID, 10);
         if (topicIds.length) body.topic_ids = topicIds;
@@ -1402,12 +1418,12 @@ function pollBuild(buildId) {
     tick();
 }
 
-async function loadAndResumeSession(sessionId) {
+async function loadAndResumeSession(resumeId) {
     try {
-        const res = await fetch(`/api/study/resume?session_id=${sessionId}`);
+        const res = await fetch(`/api/study/resume?session_id=${resumeId}`);
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || 'Failed to load session');
-        
+
         sessionId = data.session_id;
         questions = data.questions;
         attempts = (data.attempts || []).map(a => ({...a}));
@@ -1603,29 +1619,45 @@ async function submitAnswer() {
             }),
         });
         if (!res.ok || !res.body) throw new Error('Stream failed');
+        const ctype = (res.headers.get('Content-Type') || '').toLowerCase();
+        if (!ctype.includes('text/event-stream')) {
+            const text = await res.text();
+            try {
+                const j = JSON.parse(text);
+                throw new Error(j.error || text || 'Server returned non-stream response');
+            } catch (e) {
+                if (e instanceof SyntaxError) throw new Error(text || 'Server returned non-stream response');
+                throw e;
+            }
+        }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let textBuf = '';
+        const processBlock = (block) => {
+            const line = block.split('\\n').find(l => l.startsWith('data: '));
+            if (!line) return;
+            let ev;
+            try { ev = JSON.parse(line.slice(6)); } catch (e) { return; }
+            if (ev.type === 'delta') {
+                buffer += ev.text;
+                fbEl.textContent = extractFeedbackPreview(buffer);
+            } else if (ev.type === 'final') {
+                finalResult = ev;
+            } else if (ev.type === 'error') {
+                throw new Error(ev.message);
+            }
+        };
         while (true) {
             const {done, value} = await reader.read();
-            if (done) break;
+            if (done) {
+                textBuf += decoder.decode();
+                if (textBuf.trim()) processBlock(textBuf);
+                break;
+            }
             textBuf += decoder.decode(value, {stream: true});
             const events = textBuf.split('\\n\\n');
             textBuf = events.pop();
-            for (const block of events) {
-                const line = block.split('\\n').find(l => l.startsWith('data: '));
-                if (!line) continue;
-                let ev;
-                try { ev = JSON.parse(line.slice(6)); } catch (e) { continue; }
-                if (ev.type === 'delta') {
-                    buffer += ev.text;
-                    fbEl.textContent = extractFeedbackPreview(buffer);
-                } else if (ev.type === 'final') {
-                    finalResult = ev;
-                } else if (ev.type === 'error') {
-                    throw new Error(ev.message);
-                }
-            }
+            for (const block of events) processBlock(block);
         }
         if (!finalResult) throw new Error('No grade returned');
         attempts.push({
@@ -2025,12 +2057,6 @@ document.addEventListener('keydown', (e) => {
         } else if (e.key === 'Escape') {
             e.preventDefault();
             skipQuestion();
-        } else if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            navigateQuestion(-1);
-        } else if (e.key === 'ArrowRight') {
-            e.preventDefault();
-            navigateQuestion(1);
         }
     }
     // Result screen: → advances

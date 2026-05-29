@@ -25,3 +25,11 @@ MATHS_DIR = ROOT / "Mathematics Past Papers"
 
 DAILY_NEW = 7
 DAILY_RECALL = 3
+
+# Error-boost tuning for pick_weakest_topics.
+# Lower ERROR_BOOST_GRADE_MAX → only severe errors count (stricter).
+# Raise ERROR_BOOST_PER_ERROR / ERROR_BOOST_CAP → booster more aggressive.
+ERROR_BOOST_WINDOW_DAYS = 14
+ERROR_BOOST_GRADE_MAX   = 2
+ERROR_BOOST_PER_ERROR   = 0.1
+ERROR_BOOST_CAP         = 0.3

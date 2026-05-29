@@ -10,6 +10,7 @@ json_schema so the response can be streamed token-by-token to the UI:
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Iterator
 
@@ -97,46 +98,51 @@ def _blocks_to_user_text(user_blocks: list[dict]) -> str:
     return "".join(b["text"] for b in user_blocks if b.get("type") == "text")
 
 
+def _provider() -> str:
+    return os.environ.get("GEN_PROVIDER", GEN_PROVIDER)
+
+
 def _grade_model() -> str:
-    if GEN_PROVIDER == "deepseek":
+    p = _provider()
+    if p == "deepseek":
         return GEN_MODEL
     return GRADER_MODEL
 
 
 def _llm_text(*, system: str, user_blocks: list[dict], model: str, max_tokens: int = 2000) -> str:
-    if GEN_PROVIDER == "deepseek":
+    p = _provider()
+    if p == "deepseek":
         return llm_openai.call_text_openai(
             system=system,
             user_text=_blocks_to_user_text(user_blocks),
             model=model,
             max_tokens=max_tokens,
         )
-    else:
-        return llm.call_text(
-            system=system,
-            user_blocks=user_blocks,
-            cache_system=True,
-            model=model,
-            max_tokens=max_tokens,
-        )
+    return llm.call_text(
+        system=system,
+        user_blocks=user_blocks,
+        cache_system=True,
+        model=model,
+        max_tokens=max_tokens,
+    )
 
 
 def _llm_stream(*, system: str, user_blocks: list[dict], model: str, max_tokens: int = 2000):
-    if GEN_PROVIDER == "deepseek":
+    p = _provider()
+    if p == "deepseek":
         return llm_openai.stream_text_openai(
             system=system,
             user_text=_blocks_to_user_text(user_blocks),
             model=model,
             max_tokens=max_tokens,
         )
-    else:
-        return llm.stream_text(
-            system=system,
-            user_blocks=user_blocks,
-            cache_system=True,
-            model=model,
-            max_tokens=max_tokens,
-        )
+    return llm.stream_text(
+        system=system,
+        user_blocks=user_blocks,
+        cache_system=True,
+        model=model,
+        max_tokens=max_tokens,
+    )
 
 
 def _parse(text: str, total_marks: int) -> dict:

@@ -41,6 +41,9 @@ Rules:
 - Be exhaustive: include every leaf learning objective. Do not skip practical / mathematical / data-handling sections.
 - Do not invent codes. If the spec uses unnumbered headings, fabricate a stable kebab-case code (e.g. "practical-skills/uncertainties").
 - Be concise: shorten content to key phrases only, not full sentences. Example: "Derive SUVAT equations" not "Students should be able to derive the equations of motion for constant acceleration".
+- IMPORTANT: Do NOT extract the "Mathematical Notation" appendix (titled "Notation" or "Appendix: Notation").
+  That appendix defines symbols (Σ, nCr, ℕ, dy/dx, |a|, …) using the same N.M numbering as real topics,
+  causing symbol definitions to appear as selectable topics. Stop extraction before that appendix.
 """
 
 

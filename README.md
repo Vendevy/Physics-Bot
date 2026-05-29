@@ -146,7 +146,7 @@ Surfaces every consolidation note you've written, grouped by topic, newest first
 
 ### Spaced repetition
 
-- **SM-2** per topic (ease, interval, repetitions). Mastery score is a 0–1 EMA (alpha=0.2) of recent grades, used to pick "weakest" topics.
+- **SM-2** per topic (ease, interval, repetitions). Mastery score is a 0–1 EMA of recent grades, used to pick "weakest" topics. Module 1 (practical skills) and Module 2 (foundations) use alpha=0.6 (~3× faster mastery gain) because they are one-off foundational skills; all other topics use alpha=0.2.
 - **Error-pattern boosting** — topics with recent repeated low grades (sm2_grade ≤ 2 in the last 14 days) get an error boost of up to 0.3, pushing them higher in the weakest-topics ranking so you study what you keep getting wrong.
 - **Daily set** — by default `DAILY_NEW=7` generated questions on the weakest topics + `DAILY_RECALL=3` past-paper questions due for spaced recall. Recall questions are ordered by: fewest times seen, then lowest last grade, then most overdue.
 - **Mock-paper set** — every question from a chosen past paper, in original order. Batch-graded at the end.
